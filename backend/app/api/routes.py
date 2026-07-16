@@ -128,6 +128,35 @@ async def create_run(
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ) -> RunSummary:
+    from app.config import settings
+
+    if payload.tier == "tier_a" and not (settings.livekit_worker_root or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "LIVEKIT_WORKER_ROOT is not set in .env. "
+                "Hush/Hecttor/DTLN need the livekit-agent-worker checkout path "
+                "(e.g. /Users/.../Desktop/livekit-agent-worker). "
+                "Without it those engines fail with ModuleNotFoundError: services."
+            ),
+        )
+
+    # Warn early if dataset has no human_url — composite audio inflates WER.
+    if payload.tier in ("tier_a", "tier_b"):
+        calls = await session.scalars(
+            select(CallRecord).where(CallRecord.dataset_id == payload.dataset_id)
+        )
+        call_list = list(calls.all())
+        missing_human = sum(1 for c in call_list if not (getattr(c, "human_url", None) or ""))
+        if call_list and missing_human == len(call_list):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Dataset calls have no human_url. Re-import a manifest that includes "
+                    "signed human_url fields — composite recording.ogg produces useless WER."
+                ),
+            )
+
     try:
         run = await run_service.create_run(
             session,

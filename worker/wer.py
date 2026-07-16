@@ -92,10 +92,19 @@ def aggregate_engine_ranking(
     combined_turn_avg: dict[str, list[float]] = {}
     combined_weighted: dict[str, list[tuple[float, int]]] = {}
     skipped_acc: dict[str, int] = {}
+    skipped_reasons: dict[str, str] = {}
+    intentional_skips = {"bvc", "sanas"}
 
     for report in reports:
         for label, reason in (report.get("skipped_engines") or {}).items():
+            # Tier-level skips (bvc/sanas on Tier A) are expected — keep separately.
+            if label in intentional_skips and not label.startswith("hecttor/") and not label.startswith("sanas/"):
+                # "sanas" base key from skipped_engines() helper; real variants are sanas/MODEL
+                if label == "bvc" or label == "sanas":
+                    skipped_reasons.setdefault(label, str(reason))
+                    continue
             skipped_acc[label] = skipped_acc.get(label, 0) + 1
+            skipped_reasons.setdefault(label, str(reason)[:500])
         for label, eng in (report.get("engines") or {}).items():
             if eng.get("avg_wer") is None:
                 continue
@@ -138,9 +147,9 @@ def aggregate_engine_ranking(
                 "calls": 0,
                 "status": "missing",
                 "skip_count": skipped_acc.get(label, 0),
+                "skip_reason": skipped_reasons.get(label),
             }
 
-    # Preserve expected order for UI, then any extras by WER.
     ordered_labels = [k for k, _ in ranking]
     for label in expected:
         if label not in ordered_labels:
@@ -154,4 +163,5 @@ def aggregate_engine_ranking(
         "ranking_by_word_weighted_wer": [k for k, _ in ranking],
         "expected_engines": expected,
         "skipped_engine_counts": skipped_acc,
+        "skipped_engine_reasons": skipped_reasons,
     }

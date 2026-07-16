@@ -17,6 +17,7 @@ type EngineRow = {
   calls?: number;
   status?: string;
   skip_count?: number;
+  skip_reason?: string;
 };
 
 function RankingTable({ summary }: { summary: Record<string, unknown> | null | undefined }) {
@@ -24,6 +25,7 @@ function RankingTable({ summary }: { summary: Record<string, unknown> | null | u
   const ranking = (summary?.ranking_by_word_weighted_wer as string[]) || [];
   const expected = (summary?.expected_engines as string[]) || Object.keys(combined);
   const skippedCounts = (summary?.skipped_engine_counts as Record<string, number>) || {};
+  const skippedReasons = (summary?.skipped_engine_reasons as Record<string, string>) || {};
 
   const labels = useMemo(() => {
     const ordered: string[] = [];
@@ -62,10 +64,18 @@ function RankingTable({ summary }: { summary: Record<string, unknown> | null | u
               const row = combined[engine] || {};
               const ok = row.status !== "missing" && row.word_weighted_wer_pct != null;
               const rankIdx = ranking.indexOf(engine);
+              const reason = row.skip_reason || skippedReasons[engine];
               return (
-                <tr key={engine} className="border-b border-slate-100">
+                <tr key={engine} className="border-b border-slate-100 align-top">
                   <td className="py-2 pr-4">{ok && rankIdx >= 0 ? rankIdx + 1 : "—"}</td>
-                  <td className="py-2 pr-4 font-medium">{engine}</td>
+                  <td className="py-2 pr-4 font-medium">
+                    {engine}
+                    {!ok && reason && (
+                      <div className="mt-1 max-w-md text-[11px] font-normal text-rose-600">
+                        {reason}
+                      </div>
+                    )}
+                  </td>
                   <td className="py-2 pr-4">
                     {row.word_weighted_wer_pct != null ? `${row.word_weighted_wer_pct}%` : "—"}
                   </td>
@@ -87,11 +97,12 @@ function RankingTable({ summary }: { summary: Record<string, unknown> | null | u
 
       {Object.keys(skippedCounts).length > 0 && (
         <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          <div className="font-medium">Skipped / failed engines (call counts)</div>
+          <div className="font-medium">Failed engines (with reason)</div>
           <ul className="mt-1 list-disc pl-4">
             {Object.entries(skippedCounts).map(([label, count]) => (
               <li key={label}>
-                <code>{label}</code>: {count}
+                <code>{label}</code>: {count} calls
+                {skippedReasons[label] ? ` — ${skippedReasons[label]}` : ""}
               </li>
             ))}
           </ul>

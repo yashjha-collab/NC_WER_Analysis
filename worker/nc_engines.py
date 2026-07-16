@@ -79,6 +79,12 @@ def build_nc_processor(
     if engine == "none":
         return None
 
+    if engine != "none" and root is None:
+        raise RuntimeError(
+            "LIVEKIT_WORKER_ROOT is not set or invalid. "
+            "Set it in .env to your livekit-agent-worker absolute path "
+            "(needs src/services for hush/hecttor and livekit plugins for dtln)."
+        )
     if engine == "dtln":
         from livekit.plugins import dtln
 
