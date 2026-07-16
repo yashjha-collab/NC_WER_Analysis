@@ -66,6 +66,7 @@ async def import_manifest_file(
                 call_log_id=call_log_id,
                 number=row.get("number"),
                 public_url=row.get("public_url"),
+                human_url=row.get("human_url") or row.get("humanUrl"),
                 recording_url=row.get("recordingUrl") or row.get("recording_url"),
                 transcript_json=transcript,
             )

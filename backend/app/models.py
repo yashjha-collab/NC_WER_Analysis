@@ -43,6 +43,7 @@ class CallRecord(Base):
     call_log_id: Mapped[str] = mapped_column(String(64), index=True)
     number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     public_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    human_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     recording_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcript_json: Mapped[dict] = mapped_column(JSON)
 

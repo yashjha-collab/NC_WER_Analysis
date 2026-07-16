@@ -69,6 +69,8 @@ def main() -> None:
                 "--cache-dir",
                 str(REPO_ROOT / "data" / "cache"),
             ]
+            if getattr(call, "human_url", None):
+                cmd.extend(["--human-url", call.human_url])
             if call.public_url:
                 cmd.extend(["--public-url", call.public_url])
             if call.recording_url:

@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nc-strength", type=float, default=0.5)
     parser.add_argument("--livekit-worker-root", default="")
     parser.add_argument("--public-url", default="")
+    parser.add_argument("--human-url", default="")
     parser.add_argument("--recording-url", default="")
     parser.add_argument("--cache-dir", default="")
     return parser.parse_args()
@@ -78,10 +79,11 @@ def resolve_recording(args: argparse.Namespace) -> Path:
     if user_path.exists():
         return user_path
 
-    if args.public_url or args.recording_url:
+    if args.human_url or args.public_url or args.recording_url:
         cache_dir = Path(args.cache_dir or REPO_ROOT / "data" / "cache")
         return ensure_audio_for_call(
             call_log_id=args.call_id,
+            human_url=args.human_url or None,
             public_url=args.public_url or None,
             recording_url=args.recording_url or None,
             cache_dir=cache_dir,

@@ -13,10 +13,20 @@ import soundfile as sf
 from worker.wer import UserTurn
 
 
-def human_url_from_recording_url(url: str) -> str:
-    if "/recording.ogg" in url:
-        return url.replace("/recording.ogg", "/human.ogg")
-    return url
+def is_signed_url(url: str) -> bool:
+    return "X-Goog-Signature=" in url or "X-Amz-Signature=" in url or "?" in url
+
+
+def human_url_from_recording_url(url: str) -> str | None:
+    """Rewrite unsigned .../recording.ogg → .../human.ogg.
+
+    Never rewrite signed URLs — the signature is path-bound and will 403.
+    """
+    if "/recording.ogg" not in url:
+        return None
+    if is_signed_url(url):
+        return None
+    return url.replace("/recording.ogg", "/human.ogg")
 
 
 def download_audio(url: str, dest: Path, timeout: float = 120.0) -> Path:
@@ -101,12 +111,16 @@ def load_user_turns(transcript: dict) -> list[UserTurn]:
         content = (msg.get("content") or "").strip()
         if not content:
             continue
+        raw_ts = msg.get("createdAt")
+        if raw_ts is None or str(raw_ts).strip() == "":
+            # Manual golden lines without timestamps cannot be sliced reliably.
+            continue
         idx += 1
         turns.append(
             UserTurn(
                 turn=idx,
                 reference=content,
-                created_at=float(msg.get("createdAt") or 0),
+                created_at=float(raw_ts),
             )
         )
     return turns
@@ -210,20 +224,34 @@ def ensure_audio_for_call(
     public_url: str | None,
     recording_url: str | None,
     cache_dir: Path,
+    human_url: str | None = None,
 ) -> Path:
     cached = cache_dir / call_log_id / "human.ogg"
     if cached.exists() and cached.stat().st_size > 0:
         return cached
 
+    # Prefer an explicitly signed human track. Never fall back to composite
+    # recording.ogg when human_url exists. Do not rewrite signed URLs.
     candidates: list[str] = []
-    if public_url:
-        candidates.append(human_url_from_recording_url(public_url))
-        if public_url not in candidates:
-            candidates.append(public_url)
-    if recording_url:
-        human = human_url_from_recording_url(recording_url)
-        if human not in candidates:
-            candidates.append(human)
+
+    def add(url: str | None) -> None:
+        if url and url not in candidates:
+            candidates.append(url)
+
+    add(human_url)
+
+    for url in (public_url, recording_url):
+        if url and "/human.ogg" in url:
+            add(url)
+
+    for url in (public_url, recording_url):
+        add(human_url_from_recording_url(url) if url else None)
+
+    if not candidates:
+        raise RuntimeError(
+            f"No human_url for {call_log_id}. "
+            "Composite recording.ogg is not used for WER — add a signed human_url."
+        )
 
     last_error: Exception | None = None
     for url in candidates:
@@ -234,7 +262,8 @@ def ensure_audio_for_call(
             continue
 
     raise RuntimeError(
-        f"Could not download audio for {call_log_id}: {last_error}"
+        f"Could not download human audio for {call_log_id}. "
+        f"Provide a valid signed human_url. Last error: {last_error}"
     )
 
 

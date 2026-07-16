@@ -16,8 +16,22 @@ async def init_db() -> None:
     settings.cache_dir.mkdir(parents=True, exist_ok=True)
     settings.runs_dir.mkdir(parents=True, exist_ok=True)
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    def _migrate(connection) -> None:
+        Base.metadata.create_all(connection)
+        # SQLite: add human_url if an older DB was created without it.
+        try:
+            rows = connection.exec_driver_sql("PRAGMA table_info(call_records)").fetchall()
+            cols = {row[1] for row in rows}
+            if "human_url" not in cols:
+                connection.exec_driver_sql(
+                    "ALTER TABLE call_records ADD COLUMN human_url TEXT"
+                )
+        except Exception:
+            pass
+
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_migrate)
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
