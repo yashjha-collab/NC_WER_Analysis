@@ -29,6 +29,10 @@ Golden manifest JSON (callLogId → messages + public_url)
 | **B** | `sanas/*` | Linux amd64 Docker |
 | **C** | `bvc` | Out of scope (LiveKit Cloud replay only) |
 
+## Full local guide (including Sanas + Docker)
+
+See **[LOCAL_SETUP.md](./LOCAL_SETUP.md)** for a complete shareable walkthrough: prerequisites, env, Tier A, Docker Desktop file sharing, Tier B Sanas, merge, and troubleshooting.
+
 ## Quick start
 
 ### 1. Configure
