@@ -1,0 +1,18 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+RUN apt-get update -qq && apt-get install -y -qq ffmpeg && rm -rf /var/lib/apt/lists/*
+
+COPY backend/pyproject.toml backend/
+COPY backend/app backend/app
+COPY worker worker
+
+RUN pip install --no-cache-dir -e backend/
+
+ENV NC_WER_HOST=0.0.0.0
+ENV NC_WER_PORT=8080
+ENV NC_WER_DATA_DIR=/app/data
+
+EXPOSE 8080
+CMD ["python", "-m", "app.main"]

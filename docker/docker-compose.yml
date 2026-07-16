@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    ports:
+      - "8080:8080"
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+      - ../.env:/app/.env:ro
+    environment:
+      NC_WER_DATA_DIR: /app/data
+      NC_WER_DATABASE_URL: sqlite+aiosqlite:////app/data/nc_wer.db
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../docker/Dockerfile.frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+  sanas-runner:
+    profiles: ["sanas"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.sanas
+    platform: linux/amd64
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+      - ${LIVEKIT_WORKER_ROOT:-/Users/yash.jha.ext/Desktop/livekit-agent-worker}:/livekit-worker:ro
+    environment:
+      LIVEKIT_WORKER_ROOT: /livekit-worker
+      NC_WER_DATA_DIR: /app/data
