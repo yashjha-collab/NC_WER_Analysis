@@ -17,6 +17,15 @@ SANAS_MODELS = (
     "AGENTIC_ST_NC",
 )
 
+TIER_A_VARIANTS = (
+    "none",
+    "dtln",
+    "hush",
+    *(f"hecttor/{m}" for m in HECTTOR_MODELS),
+)
+
+TIER_B_VARIANTS = tuple(f"sanas/{m}" for m in SANAS_MODELS)
+
 
 @dataclass
 class UserTurn:
@@ -75,11 +84,18 @@ def weighted_wer(turns: list[dict]) -> tuple[float, int]:
     return total_edits / total_ref_words, total_ref_words
 
 
-def aggregate_engine_ranking(reports: list[dict]) -> dict:
+def aggregate_engine_ranking(
+    reports: list[dict],
+    *,
+    expected_labels: list[str] | None = None,
+) -> dict:
     combined_turn_avg: dict[str, list[float]] = {}
     combined_weighted: dict[str, list[tuple[float, int]]] = {}
+    skipped_acc: dict[str, int] = {}
 
     for report in reports:
+        for label, reason in (report.get("skipped_engines") or {}).items():
+            skipped_acc[label] = skipped_acc.get(label, 0) + 1
         for label, eng in (report.get("engines") or {}).items():
             if eng.get("avg_wer") is None:
                 continue
@@ -103,10 +119,39 @@ def aggregate_engine_ranking(reports: list[dict]) -> dict:
             "word_weighted_wer": word_w,
             "word_weighted_wer_pct": round(word_w * 100, 1),
             "calls": len(values),
+            "status": "ok",
         }
 
-    ranking = sorted(combined.items(), key=lambda x: x[1]["word_weighted_wer"])
+    ranking = sorted(
+        ((k, v) for k, v in combined.items() if v.get("status") == "ok"),
+        key=lambda x: x[1]["word_weighted_wer"],
+    )
+
+    expected = list(expected_labels or [])
+    for label in expected:
+        if label not in combined:
+            combined[label] = {
+                "turn_avg_wer": None,
+                "turn_avg_wer_pct": None,
+                "word_weighted_wer": None,
+                "word_weighted_wer_pct": None,
+                "calls": 0,
+                "status": "missing",
+                "skip_count": skipped_acc.get(label, 0),
+            }
+
+    # Preserve expected order for UI, then any extras by WER.
+    ordered_labels = [k for k, _ in ranking]
+    for label in expected:
+        if label not in ordered_labels:
+            ordered_labels.append(label)
+    for label in combined:
+        if label not in ordered_labels:
+            ordered_labels.append(label)
+
     return {
-        "combined": {k: v for k, v in ranking},
+        "combined": {k: combined[k] for k in ordered_labels if k in combined},
         "ranking_by_word_weighted_wer": [k for k, _ in ranking],
+        "expected_engines": expected,
+        "skipped_engine_counts": skipped_acc,
     }

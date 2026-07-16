@@ -3,7 +3,7 @@ import { api, CallResult, Dataset, Run } from "./api";
 
 function statusBadge(status: string) {
   const cls =
-    status.includes("fail")
+    status.includes("fail") || status.includes("missing")
       ? "badge badge-failed"
       : status.includes("running")
         ? "badge badge-running"
@@ -11,37 +11,160 @@ function statusBadge(status: string) {
   return <span className={cls}>{status}</span>;
 }
 
-function RankingTable({ summary }: { summary: Record<string, unknown> | null | undefined }) {
-  const combined = (summary?.combined as Record<string, Record<string, number>>) || {};
-  const ranking = (summary?.ranking_by_word_weighted_wer as string[]) || Object.keys(combined);
+type EngineRow = {
+  word_weighted_wer_pct?: number | null;
+  turn_avg_wer_pct?: number | null;
+  calls?: number;
+  status?: string;
+  skip_count?: number;
+};
 
-  if (!ranking.length) {
+function RankingTable({ summary }: { summary: Record<string, unknown> | null | undefined }) {
+  const combined = (summary?.combined as Record<string, EngineRow>) || {};
+  const ranking = (summary?.ranking_by_word_weighted_wer as string[]) || [];
+  const expected = (summary?.expected_engines as string[]) || Object.keys(combined);
+  const skippedCounts = (summary?.skipped_engine_counts as Record<string, number>) || {};
+
+  const labels = useMemo(() => {
+    const ordered: string[] = [];
+    for (const label of ranking) {
+      if (!ordered.includes(label)) ordered.push(label);
+    }
+    for (const label of expected) {
+      if (!ordered.includes(label)) ordered.push(label);
+    }
+    for (const label of Object.keys(combined)) {
+      if (!ordered.includes(label)) ordered.push(label);
+    }
+    return ordered;
+  }, [ranking, expected, combined]);
+
+  if (!labels.length) {
     return <p className="text-sm text-slate-500">No ranking yet.</p>;
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full text-sm">
+    <div className="space-y-4">
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="border-b text-left text-slate-500">
+              <th className="py-2 pr-4">Rank</th>
+              <th className="py-2 pr-4">Engine</th>
+              <th className="py-2 pr-4">Word-weighted WER</th>
+              <th className="py-2 pr-4">Turn-avg WER</th>
+              <th className="py-2 pr-4">Calls</th>
+              <th className="py-2">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {labels.map((engine) => {
+              const row = combined[engine] || {};
+              const ok = row.status !== "missing" && row.word_weighted_wer_pct != null;
+              const rankIdx = ranking.indexOf(engine);
+              return (
+                <tr key={engine} className="border-b border-slate-100">
+                  <td className="py-2 pr-4">{ok && rankIdx >= 0 ? rankIdx + 1 : "—"}</td>
+                  <td className="py-2 pr-4 font-medium">{engine}</td>
+                  <td className="py-2 pr-4">
+                    {row.word_weighted_wer_pct != null ? `${row.word_weighted_wer_pct}%` : "—"}
+                  </td>
+                  <td className="py-2 pr-4">
+                    {row.turn_avg_wer_pct != null ? `${row.turn_avg_wer_pct}%` : "—"}
+                  </td>
+                  <td className="py-2 pr-4">{row.calls ?? 0}</td>
+                  <td className="py-2">
+                    {ok
+                      ? statusBadge("ok")
+                      : statusBadge(row.status === "missing" ? "missing" : "failed")}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {Object.keys(skippedCounts).length > 0 && (
+        <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <div className="font-medium">Skipped / failed engines (call counts)</div>
+          <ul className="mt-1 list-disc pl-4">
+            {Object.entries(skippedCounts).map(([label, count]) => (
+              <li key={label}>
+                <code>{label}</code>: {count}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CallEngineTable({ report }: { report: Record<string, unknown> }) {
+  const engines = (report.engines as Record<string, Record<string, unknown>>) || {};
+  const skipped = (report.skipped_engines as Record<string, string>) || {};
+  const labels = [
+    ...Object.keys(engines),
+    ...Object.keys(skipped).filter((k) => !(k in engines)),
+  ];
+
+  if (!labels.length) {
+    return <p className="text-xs text-slate-500">No engine data.</p>;
+  }
+
+  return (
+    <div className="mt-2 overflow-x-auto">
+      <div className="mb-1 text-[11px] text-slate-500">
+        audio_is_human_track: {String(report.audio_is_human_track ?? "unknown")}
+      </div>
+      <table className="min-w-full text-xs">
         <thead>
           <tr className="border-b text-left text-slate-500">
-            <th className="py-2 pr-4">Rank</th>
-            <th className="py-2 pr-4">Engine</th>
-            <th className="py-2 pr-4">Word-weighted WER</th>
-            <th className="py-2 pr-4">Turn-avg WER</th>
-            <th className="py-2">Calls</th>
+            <th className="py-1 pr-3">Engine</th>
+            <th className="py-1 pr-3">WER</th>
+            <th className="py-1 pr-3">Δ vs none</th>
+            <th className="py-1">Sample (ref → hyp)</th>
           </tr>
         </thead>
         <tbody>
-          {ranking.map((engine, idx) => {
-            const row = combined[engine];
-            if (!row) return null;
+          {labels.map((label) => {
+            const eng = engines[label];
+            if (!eng) {
+              return (
+                <tr key={label} className="border-b border-slate-50">
+                  <td className="py-1 pr-3 font-medium">{label}</td>
+                  <td className="py-1 pr-3 text-rose-600" colSpan={3}>
+                    SKIP: {skipped[label]}
+                  </td>
+                </tr>
+              );
+            }
+            const turns = (eng.turns as Array<Record<string, unknown>>) || [];
+            const sample = turns[0];
+            const delta =
+              eng.delta_wer_vs_none != null
+                ? `${(Number(eng.delta_wer_vs_none) * 100).toFixed(1)} pp`
+                : "—";
             return (
-              <tr key={engine} className="border-b border-slate-100">
-                <td className="py-2 pr-4">{idx + 1}</td>
-                <td className="py-2 pr-4 font-medium">{engine}</td>
-                <td className="py-2 pr-4">{row.word_weighted_wer_pct}%</td>
-                <td className="py-2 pr-4">{row.turn_avg_wer_pct}%</td>
-                <td className="py-2">{row.calls}</td>
+              <tr key={label} className="border-b border-slate-50 align-top">
+                <td className="py-1 pr-3 font-medium">{label}</td>
+                <td className="py-1 pr-3">{String(eng.avg_wer_pct ?? "—")}%</td>
+                <td className="py-1 pr-3">{delta}</td>
+                <td className="py-1 text-slate-600">
+                  {sample ? (
+                    <>
+                      <div>
+                        <span className="text-slate-400">ref:</span> {String(sample.reference || "")}
+                      </div>
+                      <div>
+                        <span className="text-slate-400">hyp:</span> {String(sample.hypothesis || "")}
+                      </div>
+                    </>
+                  ) : (
+                    "—"
+                  )}
+                </td>
               </tr>
             );
           })}
@@ -56,6 +179,7 @@ export default function App() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [results, setResults] = useState<CallResult[]>([]);
+  const [expandedCall, setExpandedCall] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -133,7 +257,6 @@ export default function App() {
           stt_model: "ink-whisper",
           stt_language: "hi",
         },
-        call_ids: undefined,
       });
       setRuns((prev) => [run, ...prev]);
       setSelectedRunId(run.id);
@@ -184,11 +307,17 @@ export default function App() {
             ) : (
               <ul className="space-y-2 text-sm">
                 {datasets.map((d) => (
-                  <li key={d.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
+                  <li
+                    key={d.id}
+                    className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2"
+                  >
                     <span>
                       <strong>{d.name}</strong> — {d.call_count} calls
                     </span>
-                    <button className="text-xs text-slate-600 underline" onClick={() => setDatasetId(d.id)}>
+                    <button
+                      className="text-xs text-slate-600 underline"
+                      onClick={() => setDatasetId(d.id)}
+                    >
                       select
                     </button>
                   </li>
@@ -220,8 +349,10 @@ export default function App() {
               ))}
             </select>
             <select className="input" value={tier} onChange={(e) => setTier(e.target.value)}>
-              <option value="tier_a">Tier A — none, dtln, hush, hecttor</option>
-              <option value="tier_b">Tier B — sanas (Linux Docker)</option>
+              <option value="tier_a">
+                Tier A — none, dtln, hush, hecttor (all 5 models)
+              </option>
+              <option value="tier_b">Tier B — sanas (both models, Linux Docker)</option>
             </select>
             <button className="btn" onClick={handleCreateRun} disabled={!datasetId}>
               Start run
@@ -256,21 +387,32 @@ export default function App() {
         </section>
 
         <section className="card lg:col-span-2">
-          <h2 className="mb-4 text-lg font-medium">Engine ranking</h2>
+          <h2 className="mb-4 text-lg font-medium">Engine ranking (all models)</h2>
           <RankingTable summary={selectedRun?.summary_json || undefined} />
 
           {selectedRun && (
             <div className="mt-6">
-              <h3 className="mb-2 text-sm font-medium text-slate-700">Per-call results</h3>
-              <div className="max-h-80 overflow-y-auto text-sm">
+              <h3 className="mb-2 text-sm font-medium text-slate-700">Per-call reports</h3>
+              <div className="max-h-[32rem] space-y-2 overflow-y-auto text-sm">
                 {results.map((r) => (
-                  <div key={r.id} className="mb-2 rounded-lg border border-slate-100 px-3 py-2">
-                    <div className="flex items-center justify-between">
+                  <div key={r.id} className="rounded-lg border border-slate-100 px-3 py-2">
+                    <button
+                      className="flex w-full items-center justify-between text-left"
+                      onClick={() =>
+                        setExpandedCall((prev) => (prev === r.id ? null : r.id))
+                      }
+                    >
                       <span className="font-mono text-xs">{r.call_log_id}</span>
                       {statusBadge(r.status)}
-                    </div>
+                    </button>
                     {r.error_message && (
                       <p className="mt-1 text-xs text-rose-600">{r.error_message}</p>
+                    )}
+                    {expandedCall === r.id && r.report_json && (
+                      <CallEngineTable report={r.report_json as Record<string, unknown>} />
+                    )}
+                    {expandedCall === r.id && !r.report_json && (
+                      <p className="mt-2 text-xs text-slate-500">No report JSON yet.</p>
                     )}
                   </div>
                 ))}

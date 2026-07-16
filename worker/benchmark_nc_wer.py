@@ -228,7 +228,12 @@ def main() -> None:
     if call_start_ts is None:
         call_start_ts = infer_call_start_ts(transcript)
 
-    turns = assign_timestamp_segments(turns, call_start_ts, audio_duration_s)
+    turns = assign_timestamp_segments(
+        turns,
+        call_start_ts,
+        audio_duration_s,
+        transcript=transcript,
+    )
     if args.turn_align == "vad":
         turns = refine_segments_with_vad(pcm, sample_rate, turns)
 
@@ -240,9 +245,20 @@ def main() -> None:
         skip_engines=skip,
     )
 
+    source_marker = recording_path.parent / "source_url.txt"
+    audio_source_url = (
+        source_marker.read_text(encoding="utf-8").strip()
+        if source_marker.exists()
+        else None
+    )
+
     report = {
         "call_id": args.call_id,
         "recording": str(recording_path),
+        "audio_source_url": audio_source_url,
+        "audio_is_human_track": bool(
+            audio_source_url and "/human.ogg" in audio_source_url
+        ),
         "segment_mode": args.segment_mode,
         "turn_align": args.turn_align,
         "user_utterance_count": len(turns),
@@ -254,7 +270,13 @@ def main() -> None:
         "engines": {},
         "skipped_engines": skipped_engines(skip),
         "reference_turns": [
-            {"turn": t.turn, "reference": t.reference, "created_at": t.created_at}
+            {
+                "turn": t.turn,
+                "reference": t.reference,
+                "created_at": t.created_at,
+                "start_s": t.start_s,
+                "end_s": t.end_s,
+            }
             for t in turns
         ],
     }

@@ -91,6 +91,20 @@ def _run_benchmark_subprocess(
         cmd.extend(["--livekit-worker-root", settings.livekit_worker_root])
 
     env = {**os.environ}
+    if settings.hecttor_api_key:
+        env["HECTTOR_API_KEY"] = settings.hecttor_api_key
+    if settings.cartesia_api_key:
+        env["CARTESIA_API_KEY"] = settings.cartesia_api_key
+    if settings.deepgram_api_key:
+        env["DEEPGRAM_API_KEY"] = settings.deepgram_api_key
+    if settings.sanas_endpoint:
+        env["SANAS_ENDPOINT"] = settings.sanas_endpoint
+    if settings.sanas_account_id:
+        env["SANAS_ACCOUNT_ID"] = settings.sanas_account_id
+    if settings.sanas_account_secret:
+        env["SANAS_ACCOUNT_SECRET"] = settings.sanas_account_secret
+    env["SANAS_SECURE_MEDIA"] = "true" if settings.sanas_secure_media else "false"
+
     if settings.livekit_worker_root:
         env["LIVEKIT_WORKER_ROOT"] = settings.livekit_worker_root
         env["PYTHONPATH"] = str(Path(settings.livekit_worker_root) / "src")
@@ -162,9 +176,15 @@ async def _process_run(run_id: int) -> None:
             await session.commit()
 
         if reports:
-            summary = aggregate_engine_ranking(reports)
+            from worker.nc_engines import expected_labels_for_tier
+
+            summary = aggregate_engine_ranking(
+                reports,
+                expected_labels=expected_labels_for_tier(run.tier),
+            )
             summary["calls"] = len(reports)
             summary["failed_calls"] = failed
+            summary["tier"] = run.tier
             run.summary_json = summary
             summary_path = run_dir / "summary.json"
             summary_path.write_text(

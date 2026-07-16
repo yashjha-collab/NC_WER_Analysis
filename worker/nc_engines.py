@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import os
 import sys
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from worker.wer import HECTTOR_MODELS, SANAS_MODELS
+from worker.wer import HECTTOR_MODELS, SANAS_MODELS, TIER_A_VARIANTS, TIER_B_VARIANTS
 
 
 def _setup_livekit_worker(worker_root: str | None) -> Path | None:
@@ -20,6 +21,16 @@ def _setup_livekit_worker(worker_root: str | None) -> Path | None:
         return None
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
+
+    # Prefer the worker Poetry/.venv site-packages so hecttor_sdk / dtln / hush resolve.
+    for pattern in (
+        str(path / ".venv" / "lib" / "python*" / "site-packages"),
+        str(path / ".venv" / "lib64" / "python*" / "site-packages"),
+    ):
+        for site in glob.glob(pattern):
+            if site not in sys.path:
+                sys.path.insert(0, site)
+
     return path
 
 
@@ -62,7 +73,7 @@ def build_nc_processor(
     strength: float,
     worker_root: str | None = None,
 ) -> Any | None:
-    _setup_livekit_worker(worker_root)
+    root = _setup_livekit_worker(worker_root)
     engine = engine.lower()
 
     if engine == "none":
@@ -84,6 +95,18 @@ def build_nc_processor(
         api_key = os.getenv("HECTTOR_API_KEY", "")
         if not api_key:
             raise RuntimeError("HECTTOR_API_KEY is not set")
+        try:
+            import hecttor_sdk  # noqa: F401
+        except ImportError as exc:
+            hint = ""
+            if root:
+                hint = (
+                    f" Install the macOS/Linux wheel from {root / 'wheels'} "
+                    "into this venv (see LOCAL_SETUP.md)."
+                )
+            raise RuntimeError(
+                f"hecttor_sdk not importable.{hint} Original: {exc}"
+            ) from exc
         return HecttorEnhancer(
             api_key=api_key,
             model_name=model or "coda-1.0",
@@ -129,6 +152,12 @@ def list_engine_variants(
         variants.append(("bvc", "bvc", None))
 
     return variants
+
+
+def expected_labels_for_tier(tier: str) -> list[str]:
+    if tier == "tier_b":
+        return list(TIER_B_VARIANTS)
+    return list(TIER_A_VARIANTS)
 
 
 def skipped_engines(skip_engines: set[str]) -> dict[str, str]:

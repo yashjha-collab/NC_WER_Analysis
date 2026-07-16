@@ -33,12 +33,15 @@ app.include_router(router)
 
 def main() -> None:
     import uvicorn
+    from dotenv import load_dotenv
 
+    load_dotenv(REPO_ROOT / ".env")
     uvicorn.run(
         "app.main:app",
         host=settings.nc_wer_host,
         port=settings.nc_wer_port,
         reload=True,
+        reload_dirs=[str(REPO_ROOT / "backend"), str(REPO_ROOT / "worker")],
     )
 
 

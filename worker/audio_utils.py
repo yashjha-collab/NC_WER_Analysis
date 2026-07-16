@@ -128,30 +128,64 @@ def load_user_turns(transcript: dict) -> list[UserTurn]:
 
 def infer_call_start_ts(transcript: dict) -> float:
     messages = transcript.get("messages") or []
-    timestamps = [
-        float(m.get("createdAt"))
-        for m in messages
-        if m.get("createdAt") is not None
-    ]
+    timestamps: list[float] = []
+    for m in messages:
+        raw = m.get("createdAt")
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            timestamps.append(float(raw))
+        except (TypeError, ValueError):
+            continue
     return min(timestamps) if timestamps else 0.0
 
 
+def _message_offsets_s(transcript: dict, call_start_ts: float) -> list[float]:
+    """Wall-clock offsets for every message with a valid timestamp."""
+    offsets: list[float] = []
+    for m in transcript.get("messages") or []:
+        raw = m.get("createdAt")
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            offsets.append(max(0.0, float(raw) - call_start_ts))
+        except (TypeError, ValueError):
+            continue
+    return sorted(offsets)
+
+
 def assign_timestamp_segments(
-    turns: list[UserTurn], call_start_ts: float, audio_duration_s: float
+    turns: list[UserTurn],
+    call_start_ts: float,
+    audio_duration_s: float,
+    *,
+    transcript: dict | None = None,
+    max_turn_s: float = 6.0,
 ) -> list[UserTurn]:
+    """Slice each user turn using the next *any-role* message as the end bound.
+
+    Ending only at the next *user* turn pulls in long agent speech windows on
+    composite audio (and noisy silence on human tracks) → STT dumps long
+    hypotheses → WER hundreds of percent.
+    """
     if not turns:
         return turns
 
+    all_offsets = _message_offsets_s(transcript or {}, call_start_ts)
     padded: list[UserTurn] = []
-    for i, turn in enumerate(turns):
-        start_s = max(0.0, turn.created_at - call_start_ts - 0.35)
-        if i + 1 < len(turns):
-            next_start = max(0.0, turns[i + 1].created_at - call_start_ts - 0.1)
-            end_s = min(audio_duration_s, next_start)
-        else:
-            end_s = min(audio_duration_s, start_s + 8.0)
+    for turn in turns:
+        start_s = max(0.0, turn.created_at - call_start_ts - 0.25)
+        # Next message after this turn's timestamp (assistant or user).
+        end_s = start_s + max_turn_s
+        for off in all_offsets:
+            if off > (turn.created_at - call_start_ts) + 0.05:
+                end_s = min(end_s, off - 0.05)
+                break
+        end_s = min(audio_duration_s, max(start_s + 0.4, end_s))
         if end_s <= start_s:
-            end_s = min(audio_duration_s, start_s + 2.0)
+            end_s = min(audio_duration_s, start_s + 1.5)
+        # Hard cap so one bad timestamp can't STT half the call.
+        end_s = min(end_s, start_s + max_turn_s, audio_duration_s)
         padded.append(
             UserTurn(
                 turn=turn.turn,
@@ -172,14 +206,18 @@ def refine_segments_with_vad(
     except ImportError:
         return turns
 
+    # webrtcvad only accepts 8/16/32/48 kHz — normalize to 16 kHz for detection.
+    vad_rate = 16_000
+    pcm_vad = resample_pcm(pcm, sample_rate, vad_rate) if sample_rate != vad_rate else pcm
+
     vad = webrtcvad.Vad(2)
     frame_ms = 30
-    frame_len = int(sample_rate * frame_ms / 1000)
+    frame_len = int(vad_rate * frame_ms / 1000)
 
     def speech_bounds(start_s: float, end_s: float) -> tuple[float, float]:
-        start_idx = int(start_s * sample_rate)
-        end_idx = int(end_s * sample_rate)
-        region = pcm[start_idx:end_idx]
+        start_idx = int(start_s * vad_rate)
+        end_idx = int(end_s * vad_rate)
+        region = pcm_vad[start_idx:end_idx]
         if len(region) < frame_len:
             return start_s, end_s
 
@@ -189,14 +227,14 @@ def refine_segments_with_vad(
             frame = pcm16[offset * 2 : (offset + frame_len) * 2]
             if len(frame) < frame_len * 2:
                 continue
-            if vad.is_speech(frame, sample_rate):
+            if vad.is_speech(frame, vad_rate):
                 speech_frames.append(offset)
 
         if not speech_frames:
             return start_s, end_s
 
-        first = speech_frames[0] / sample_rate
-        last = (speech_frames[-1] + frame_len) / sample_rate
+        first = speech_frames[0] / vad_rate
+        last = (speech_frames[-1] + frame_len) / vad_rate
         pad = 0.15
         return max(start_s, start_s + first - pad), min(end_s, start_s + last + pad)
 
@@ -226,12 +264,10 @@ def ensure_audio_for_call(
     cache_dir: Path,
     human_url: str | None = None,
 ) -> Path:
-    cached = cache_dir / call_log_id / "human.ogg"
-    if cached.exists() and cached.stat().st_size > 0:
-        return cached
+    call_dir = cache_dir / call_log_id
+    cached = call_dir / "human.ogg"
+    marker = call_dir / "source_url.txt"
 
-    # Prefer an explicitly signed human track. Never fall back to composite
-    # recording.ogg when human_url exists. Do not rewrite signed URLs.
     candidates: list[str] = []
 
     def add(url: str | None) -> None:
@@ -239,11 +275,9 @@ def ensure_audio_for_call(
             candidates.append(url)
 
     add(human_url)
-
     for url in (public_url, recording_url):
         if url and "/human.ogg" in url:
             add(url)
-
     for url in (public_url, recording_url):
         add(human_url_from_recording_url(url) if url else None)
 
@@ -253,12 +287,29 @@ def ensure_audio_for_call(
             "Composite recording.ogg is not used for WER — add a signed human_url."
         )
 
+    preferred = candidates[0]
+    if (
+        cached.exists()
+        and cached.stat().st_size > 0
+        and marker.exists()
+        and marker.read_text(encoding="utf-8").strip() == preferred
+    ):
+        return cached
+
+    # Stale cache from an older composite download — force re-fetch.
+    if cached.exists():
+        cached.unlink(missing_ok=True)
+
     last_error: Exception | None = None
     for url in candidates:
         try:
-            return download_audio(url, cached)
+            path = download_audio(url, cached)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(url, encoding="utf-8")
+            return path
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            cached.unlink(missing_ok=True)
             continue
 
     raise RuntimeError(

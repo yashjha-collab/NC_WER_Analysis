@@ -41,7 +41,7 @@ You need **two checkouts**:
 | Tool | Version / notes |
 |------|------------------|
 | macOS or Linux | Apple Silicon Mac is fine for Tier A |
-| Python | 3.12+ (3.13 preferred; worker NC wheels are often `cp313`) |
+| Python | **3.13** (required — Hecttor/Sanas wheels are `cp313`) |
 | Node.js | 20+ |
 | ffmpeg | `brew install ffmpeg` |
 | Git | — |
@@ -153,10 +153,17 @@ At runtime the worker adds `{LIVEKIT_WORKER_ROOT}/src` to `PYTHONPATH` and impor
 
 ```bash
 cd /path/to/NC_WER_Analysis
-make setup
+# Ensure LIVEKIT_WORKER_ROOT is in .env first
+make setup          # creates Python 3.13 venv + installs hecttor wheel
 ```
 
-This creates `.venv`, installs the backend, installs frontend npm deps, and creates `data/` folders.
+If the venv was created with Python 3.14 earlier, recreate it:
+
+```bash
+rm -rf .venv
+python3.13 -m venv .venv
+make install install-nc-wheels
+```
 
 Verify ffmpeg:
 
