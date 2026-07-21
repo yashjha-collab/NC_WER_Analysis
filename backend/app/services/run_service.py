@@ -107,7 +107,11 @@ def _run_benchmark_subprocess(
 
     if settings.livekit_worker_root:
         env["LIVEKIT_WORKER_ROOT"] = settings.livekit_worker_root
-        env["PYTHONPATH"] = str(Path(settings.livekit_worker_root) / "src")
+        worker_src = str(Path(settings.livekit_worker_root) / "src")
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{worker_src}{os.pathsep}{existing}" if existing else worker_src
+        )
 
     subprocess.run(cmd, cwd=str(REPO_ROOT), check=True, env=env)
     return output

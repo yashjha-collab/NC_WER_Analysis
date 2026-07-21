@@ -27,6 +27,32 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@router.get("/diagnostics")
+async def diagnostics() -> dict:
+    """Probe Tier A NC engines on this machine (root, hush lib, hecttor wheel/key)."""
+    import os
+
+    from worker.diagnostics import probe_tier_a
+
+    # Mirror keys the benchmark subprocess receives from settings.
+    env_backup = {
+        "HECTTOR_API_KEY": os.environ.get("HECTTOR_API_KEY"),
+        "LIVEKIT_WORKER_ROOT": os.environ.get("LIVEKIT_WORKER_ROOT"),
+    }
+    try:
+        if settings.hecttor_api_key:
+            os.environ["HECTTOR_API_KEY"] = settings.hecttor_api_key
+        if settings.livekit_worker_root:
+            os.environ["LIVEKIT_WORKER_ROOT"] = settings.livekit_worker_root
+        return probe_tier_a(settings.livekit_worker_root or None)
+    finally:
+        for key, value in env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 @router.get("/datasets", response_model=list[DatasetSummary])
 async def list_datasets(session: AsyncSession = Depends(get_session)) -> list[DatasetSummary]:
     datasets = await dataset_service.list_datasets(session)
@@ -130,16 +156,43 @@ async def create_run(
 ) -> RunSummary:
     from app.config import settings
 
-    if payload.tier == "tier_a" and not (settings.livekit_worker_root or "").strip():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "LIVEKIT_WORKER_ROOT is not set in .env. "
-                "Hush/Hecttor/DTLN need the livekit-agent-worker checkout path "
-                "(e.g. /Users/.../Desktop/livekit-agent-worker). "
-                "Without it those engines fail with ModuleNotFoundError: services."
-            ),
-        )
+    if payload.tier == "tier_a":
+        if not (settings.livekit_worker_root or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "LIVEKIT_WORKER_ROOT is not set in .env. "
+                    "Hush/Hecttor/DTLN need the livekit-agent-worker checkout path "
+                    "(e.g. /Users/.../Desktop/livekit-agent-worker). "
+                    "Without it those engines fail with ModuleNotFoundError: services."
+                ),
+            )
+
+        # Fail fast with the real import/runtime error (root set ≠ engines ready).
+        import os
+
+        from worker.diagnostics import probe_tier_a
+
+        if settings.hecttor_api_key:
+            os.environ["HECTTOR_API_KEY"] = settings.hecttor_api_key
+        os.environ["LIVEKIT_WORKER_ROOT"] = settings.livekit_worker_root
+        probe = probe_tier_a(settings.livekit_worker_root)
+        if not probe.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": probe.get("message"),
+                    "failed_engines": probe.get("failed_engines"),
+                    "hints": probe.get("hints"),
+                    "engines": {
+                        name: {
+                            "ok": result.get("ok"),
+                            "error": result.get("error"),
+                        }
+                        for name, result in (probe.get("engines") or {}).items()
+                    },
+                },
+            )
 
     # Warn early if dataset has no human_url — composite audio inflates WER.
     if payload.tier in ("tier_a", "tier_b"):

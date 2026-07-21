@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, CallResult, Dataset, Run } from "./api";
+import { api, CallResult, Dataset, Diagnostics, Run } from "./api";
 
 function statusBadge(status: string) {
   const cls =
@@ -18,6 +18,8 @@ type EngineRow = {
   status?: string;
   skip_count?: number;
   skip_reason?: string;
+  primary_reason?: string | null;
+  high_wer_reasons?: string[];
 };
 
 function RankingTable({ summary }: { summary: Record<string, unknown> | null | undefined }) {
@@ -75,6 +77,11 @@ function RankingTable({ summary }: { summary: Record<string, unknown> | null | u
                         {reason}
                       </div>
                     )}
+                    {ok && row.primary_reason && (row.word_weighted_wer_pct ?? 0) >= 35 && (
+                      <div className="mt-1 max-w-lg rounded bg-amber-50 px-2 py-1 text-[11px] font-normal text-amber-950">
+                        <span className="font-medium">Reason:</span> {row.primary_reason}
+                      </div>
+                    )}
                   </td>
                   <td className="py-2 pr-4">
                     {row.word_weighted_wer_pct != null ? `${row.word_weighted_wer_pct}%` : "—"}
@@ -119,6 +126,7 @@ function CallEngineTable({ report }: { report: Record<string, unknown> }) {
     ...Object.keys(engines),
     ...Object.keys(skipped).filter((k) => !(k in engines)),
   ];
+  const [openEngine, setOpenEngine] = useState<string | null>(null);
 
   if (!labels.length) {
     return <p className="text-xs text-slate-500">No engine data.</p>;
@@ -135,7 +143,7 @@ function CallEngineTable({ report }: { report: Record<string, unknown> }) {
             <th className="py-1 pr-3">Engine</th>
             <th className="py-1 pr-3">WER</th>
             <th className="py-1 pr-3">Δ vs none</th>
-            <th className="py-1">Sample (ref → hyp)</th>
+            <th className="py-1">Calculation + reason</th>
           </tr>
         </thead>
         <tbody>
@@ -152,29 +160,132 @@ function CallEngineTable({ report }: { report: Record<string, unknown> }) {
               );
             }
             const turns = (eng.turns as Array<Record<string, unknown>>) || [];
-            const sample = turns[0];
             const delta =
               eng.delta_wer_vs_none != null
                 ? `${(Number(eng.delta_wer_vs_none) * 100).toFixed(1)} pp`
                 : "—";
+            const edits = (eng.edit_totals as Record<string, unknown>) || {};
+            const reasons = (eng.high_wer_reasons as string[]) || [];
+            const primary = String(eng.primary_reason || reasons[0] || "");
+            const isOpen = openEngine === label;
+            const showWhy = Number(eng.avg_wer_pct ?? 0) >= 35 || reasons.length > 0;
             return (
               <tr key={label} className="border-b border-slate-50 align-top">
-                <td className="py-1 pr-3 font-medium">{label}</td>
+                <td className="py-1 pr-3 font-medium">
+                  <button
+                    className="text-left underline-offset-2 hover:underline"
+                    onClick={() => setOpenEngine(isOpen ? null : label)}
+                  >
+                    {label}
+                  </button>
+                </td>
                 <td className="py-1 pr-3">{String(eng.avg_wer_pct ?? "—")}%</td>
                 <td className="py-1 pr-3">{delta}</td>
-                <td className="py-1 text-slate-600">
-                  {sample ? (
-                    <>
-                      <div>
-                        <span className="text-slate-400">ref:</span> {String(sample.reference || "")}
-                      </div>
-                      <div>
-                        <span className="text-slate-400">hyp:</span> {String(sample.hypothesis || "")}
-                      </div>
-                    </>
-                  ) : (
-                    "—"
+                <td className="py-1 text-slate-700">
+                  {edits.formula != null && (
+                    <div className="font-mono text-[11px] text-slate-600">
+                      Calculation: {String(edits.formula)}
+                      <span className="ml-1 text-slate-500">
+                        (S={String(edits.substitutions)} D={String(edits.deletions)} I=
+                        {String(edits.insertions)})
+                      </span>
+                    </div>
                   )}
+                  {showWhy && primary && (
+                    <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-950">
+                      <span className="font-medium">Reason:</span> {primary}
+                    </div>
+                  )}
+                  {showWhy && reasons.length > 1 && (
+                    <ul className="mt-1 list-disc pl-4 text-[11px] text-amber-900">
+                      {reasons.slice(1).map((r) => (
+                        <li key={r}>{r}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {!showWhy && turns[0] && (
+                    <div className="text-slate-500">
+                      <div>
+                        <span className="text-slate-400">ref:</span>{" "}
+                        {String(turns[0].reference || "")}
+                      </div>
+                      <div>
+                        <span className="text-slate-400">hyp:</span>{" "}
+                        {String(turns[0].hypothesis || "")}
+                      </div>
+                    </div>
+                  )}
+                  {isOpen && (
+                    <div className="mt-2 space-y-2 rounded border border-slate-100 bg-slate-50 p-2">
+                      <div className="text-[11px] font-medium text-slate-700">
+                        Per-turn breakdown
+                      </div>
+                      {turns.map((t) => {
+                        const detail =
+                          (t.wer_detail as Record<string, unknown> | undefined) || {};
+                        const turnReasons = (detail.reasons as string[]) || [];
+                        return (
+                          <div
+                            key={String(t.turn)}
+                            className="border-t border-slate-200 pt-2 text-[11px]"
+                          >
+                            <div className="font-medium">
+                              Turn {String(t.turn)} — {String(t.wer_pct ?? "—")}%
+                            </div>
+                            {detail.formula ? (
+                              <div className="font-mono text-[10px] text-slate-500">
+                                Calculation: {String(detail.formula)}
+                              </div>
+                            ) : null}
+                            <div>
+                              <span className="text-slate-400">ref:</span>{" "}
+                              {String(t.reference || "")}
+                            </div>
+                            <div>
+                              <span className="text-slate-400">hyp:</span>{" "}
+                              {String(t.hypothesis || "")}
+                            </div>
+                            {turnReasons.length > 0 && (
+                              <div className="mt-1 space-y-0.5">
+                                {turnReasons.map((r) => (
+                                  <div key={r} className="text-amber-900">
+                                    Reason: {r}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {Array.isArray(detail.substitution_pairs) &&
+                              (detail.substitution_pairs as string[]).length > 0 && (
+                                <div className="text-slate-600">
+                                  subs:{" "}
+                                  {(detail.substitution_pairs as string[]).join(", ")}
+                                </div>
+                              )}
+                            {Array.isArray(detail.deleted_words) &&
+                              (detail.deleted_words as string[]).length > 0 && (
+                                <div className="text-slate-600">
+                                  deleted:{" "}
+                                  {(detail.deleted_words as string[]).join(", ")}
+                                </div>
+                              )}
+                            {Array.isArray(detail.inserted_words) &&
+                              (detail.inserted_words as string[]).length > 0 && (
+                                <div className="text-slate-600">
+                                  inserted:{" "}
+                                  {(detail.inserted_words as string[]).join(", ")}
+                                </div>
+                              )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <button
+                    className="mt-1 text-[10px] text-slate-500 underline"
+                    onClick={() => setOpenEngine(isOpen ? null : label)}
+                  >
+                    {isOpen ? "Hide turn details" : "Show turn details"}
+                  </button>
                 </td>
               </tr>
             );
@@ -201,6 +312,7 @@ export default function App() {
   const [runName, setRunName] = useState("golden-tier-a");
   const [datasetId, setDatasetId] = useState<number | "">("");
   const [tier, setTier] = useState("tier_a");
+  const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
 
   const selectedRun = useMemo(
     () => runs.find((r) => r.id === selectedRunId) || null,
@@ -211,9 +323,14 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const [ds, rs] = await Promise.all([api.listDatasets(), api.listRuns()]);
+      const [ds, rs, diag] = await Promise.all([
+        api.listDatasets(),
+        api.listRuns(),
+        api.diagnostics().catch(() => null),
+      ]);
       setDatasets(ds);
       setRuns(rs);
+      setDiagnostics(diag);
       if (!datasetId && ds[0]) setDatasetId(ds[0].id);
       if (!selectedRunId && rs[0]) setSelectedRunId(rs[0].id);
     } catch (err) {
@@ -284,6 +401,43 @@ export default function App() {
           Benchmark noise-cancellation engines against golden transcripts using public recording URLs.
         </p>
       </header>
+
+      {diagnostics && (
+        <div
+          className={`mb-4 rounded-lg border px-4 py-3 text-sm ${
+            diagnostics.ok
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+              : "border-amber-200 bg-amber-50 text-amber-950"
+          }`}
+        >
+          <div className="font-medium">
+            Engine diagnostics: {diagnostics.ok ? "ready" : "not ready"}
+          </div>
+          <p className="mt-1">{diagnostics.message}</p>
+          {diagnostics.hints && diagnostics.hints.length > 0 && (
+            <ul className="mt-2 list-disc pl-5 text-xs">
+              {diagnostics.hints.map((hint) => (
+                <li key={hint}>{hint}</li>
+              ))}
+            </ul>
+          )}
+          {diagnostics.engines && (
+            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+              {Object.entries(diagnostics.engines).map(([name, result]) => (
+                <span
+                  key={name}
+                  className={`rounded px-2 py-0.5 ${
+                    result.ok ? "bg-emerald-100" : "bg-rose-100 text-rose-800"
+                  }`}
+                  title={result.error || result.processor || ""}
+                >
+                  {name}: {result.ok ? "ok" : "fail"}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">

@@ -34,7 +34,7 @@ from worker.nc_engines import (  # noqa: E402
     skipped_engines,
 )
 from worker.stt import transcribe_pcm  # noqa: E402
-from worker.wer import normalize_text, word_error_rate  # noqa: E402
+from worker.wer import explain_wer, normalize_text  # noqa: E402
 
 STT_SAMPLE_RATE = 16_000
 
@@ -114,6 +114,7 @@ def score_engine(
     turn_rows: list[dict] = []
     wer_values: list[float] = []
     exact_matches = 0
+    total_s = total_d = total_i = total_ref = 0
 
     if args.segment_mode == "full":
         processed = (
@@ -130,17 +131,22 @@ def score_engine(
             language=args.stt_language,
         )
         reference = " ".join(t.reference for t in turns)
-        wer = word_error_rate(reference, hypothesis)
+        detail = explain_wer(reference, hypothesis)
         turn_rows.append(
             {
                 "turn": 1,
                 "reference": reference,
                 "hypothesis": hypothesis,
-                "wer": wer,
-                "wer_pct": round(wer * 100, 1),
+                "wer": detail["wer"],
+                "wer_pct": detail["wer_pct"],
+                "wer_detail": detail,
             }
         )
-        wer_values.append(wer)
+        wer_values.append(detail["wer"])
+        total_s += detail["substitutions"]
+        total_d += detail["deletions"]
+        total_i += detail["insertions"]
+        total_ref += detail["n_ref"]
         if normalize_text(reference) == normalize_text(hypothesis):
             exact_matches = 1
     else:
@@ -149,18 +155,30 @@ def score_engine(
                 continue
             segment = slice_pcm(pcm, sample_rate, turn.start_s, turn.end_s)
             if len(segment) < int(0.2 * sample_rate):
+                detail = explain_wer(turn.reference, "")
+                detail["reasons"] = [
+                    f"Audio slice too short "
+                    f"({len(segment) / sample_rate:.2f}s < 0.2s) "
+                    f"→ empty hypothesis; all reference words count as deletions"
+                ] + detail["reasons"]
+                detail["primary_reason"] = detail["reasons"][0]
                 turn_rows.append(
                     {
                         "turn": turn.turn,
                         "reference": turn.reference,
                         "hypothesis": "",
-                        "wer": 1.0,
-                        "wer_pct": 100.0,
+                        "wer": detail["wer"],
+                        "wer_pct": detail["wer_pct"],
                         "start_s": turn.start_s,
                         "end_s": turn.end_s,
+                        "wer_detail": detail,
                     }
                 )
-                wer_values.append(1.0)
+                wer_values.append(detail["wer"])
+                total_s += detail["substitutions"]
+                total_d += detail["deletions"]
+                total_i += detail["insertions"]
+                total_ref += detail["n_ref"]
                 continue
 
             processed = (
@@ -176,23 +194,34 @@ def score_engine(
                 model=args.stt_model,
                 language=args.stt_language,
             )
-            wer = word_error_rate(turn.reference, hypothesis)
+            detail = explain_wer(turn.reference, hypothesis)
             if normalize_text(turn.reference) == normalize_text(hypothesis):
                 exact_matches += 1
-            wer_values.append(wer)
+            wer_values.append(detail["wer"])
+            total_s += detail["substitutions"]
+            total_d += detail["deletions"]
+            total_i += detail["insertions"]
+            total_ref += detail["n_ref"]
             turn_rows.append(
                 {
                     "turn": turn.turn,
                     "reference": turn.reference,
                     "hypothesis": hypothesis,
-                    "wer": wer,
-                    "wer_pct": round(wer * 100, 1),
+                    "wer": detail["wer"],
+                    "wer_pct": detail["wer_pct"],
                     "start_s": turn.start_s,
                     "end_s": turn.end_s,
+                    "wer_detail": detail,
                 }
             )
 
     avg_wer = round(sum(wer_values) / len(wer_values), 4) if wer_values else 1.0
+    engine_formula = (
+        f"Σ(S+D+I)/ΣN = ({total_s}+{total_d}+{total_i})/{total_ref}"
+        if total_ref
+        else "no reference words"
+    )
+    top_reasons = _top_wer_reasons(turn_rows)
     return {
         "engine": engine,
         "nc_model": model,
@@ -204,8 +233,50 @@ def score_engine(
         "nonempty_hypothesis_turns": sum(
             1 for t in turn_rows if (t.get("hypothesis") or "").strip()
         ),
+        "edit_totals": {
+            "substitutions": total_s,
+            "deletions": total_d,
+            "insertions": total_i,
+            "ref_words": total_ref,
+            "formula": engine_formula,
+        },
+        "high_wer_reasons": top_reasons,
+        "primary_reason": top_reasons[0] if top_reasons else None,
         "turns": turn_rows,
     }
+
+
+def _top_wer_reasons(turn_rows: list[dict], limit: int = 5) -> list[str]:
+    """Aggregate the most important high-WER reasons across turns."""
+    scored: list[tuple[float, str]] = []
+    for row in turn_rows:
+        detail = row.get("wer_detail") or {}
+        wer = float(row.get("wer") or 0.0)
+        if wer < 0.35:
+            continue
+        for reason in detail.get("reasons") or []:
+            scored.append((wer, reason))
+        # Also surface edit formula for very high turns.
+        if wer >= 0.8 and detail.get("formula"):
+            scored.append(
+                (
+                    wer,
+                    f"Turn {row.get('turn')}: {detail['formula']}",
+                )
+            )
+
+    # Prefer higher-WER reasons; de-dupe by text.
+    scored.sort(key=lambda x: x[0], reverse=True)
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, reason in scored:
+        if reason in seen:
+            continue
+        seen.add(reason)
+        out.append(reason)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def main() -> None:
@@ -300,7 +371,23 @@ def main() -> None:
             elif none_wer is not None:
                 result["delta_wer_vs_none"] = round(result["avg_wer"] - none_wer, 4)
             report["engines"][label] = result
-            print(f"  {label:24s} WER={result['avg_wer_pct']:5.1f}%", flush=True)
+            reason = result.get("primary_reason") or ""
+            suffix = f" — {reason}" if reason and result["avg_wer"] >= 0.35 else ""
+            print(
+                f"  {label:24s} WER={result['avg_wer_pct']:5.1f}%{suffix}",
+                flush=True,
+            )
+            edits = result.get("edit_totals") or {}
+            if edits and result["avg_wer"] >= 0.35:
+                print(
+                    f"  {'':24s} Calculation: {edits.get('formula')} "
+                    f"(S={edits.get('substitutions')} "
+                    f"D={edits.get('deletions')} "
+                    f"I={edits.get('insertions')})",
+                    flush=True,
+                )
+            for extra in (result.get("high_wer_reasons") or [])[1:3]:
+                print(f"  {'':24s} Reason: {extra}", flush=True)
         except Exception as exc:  # noqa: BLE001
             report["skipped_engines"][label] = str(exc)
             print(f"  {label:24s} SKIP: {exc}", flush=True)
