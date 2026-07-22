@@ -62,8 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--all-models", action="store_true")
     parser.add_argument("--engines", default="")
     parser.add_argument("--skip-engines", default="bvc")
-    parser.add_argument("--stt-provider", default="cartesia")
-    parser.add_argument("--stt-model", default="ink-whisper")
+    parser.add_argument("--stt-provider", default="deepgram")
+    parser.add_argument("--stt-model", default="nova-2")
     parser.add_argument("--stt-language", default="hi")
     parser.add_argument("--nc-strength", type=float, default=0.5)
     parser.add_argument("--livekit-worker-root", default="")
@@ -315,8 +315,9 @@ def score_engine(
 
 
 def _top_wer_reasons(turn_rows: list[dict], limit: int = 5) -> list[str]:
-    """Aggregate the most important high-WER reasons across turns."""
+    """Aggregate high-WER reasons; scored-turn issues first, exclusions last."""
     scored: list[tuple[float, str]] = []
+    excluded_notes: list[str] = []
     for row in turn_rows:
         detail = row.get("wer_detail") or {}
         if row.get("excluded_from_avg"):
@@ -325,12 +326,9 @@ def _top_wer_reasons(turn_rows: list[dict], limit: int = 5) -> list[str]:
             if not primary:
                 reasons = detail.get("reasons") or []
                 primary = reasons[0] if reasons else None
-            scored.append(
-                (
-                    99.0,
-                    f"Turn {row.get('turn')} excluded ({reason})"
-                    + (f": {primary}" if primary else ""),
-                )
+            excluded_notes.append(
+                f"Turn {row.get('turn')} excluded ({reason})"
+                + (f": {primary}" if primary else "")
             )
             continue
         raw_wer = row.get("wer")
@@ -341,7 +339,6 @@ def _top_wer_reasons(turn_rows: list[dict], limit: int = 5) -> list[str]:
             continue
         for reason in detail.get("reasons") or []:
             scored.append((wer, reason))
-        # Also surface edit formula for very high turns.
         if wer >= 0.8 and detail.get("formula"):
             scored.append(
                 (
@@ -350,7 +347,6 @@ def _top_wer_reasons(turn_rows: list[dict], limit: int = 5) -> list[str]:
                 )
             )
 
-    # Prefer higher-WER reasons; de-dupe by text.
     scored.sort(key=lambda x: x[0], reverse=True)
     seen: set[str] = set()
     out: list[str] = []
@@ -359,6 +355,14 @@ def _top_wer_reasons(turn_rows: list[dict], limit: int = 5) -> list[str]:
             continue
         seen.add(reason)
         out.append(reason)
+        if len(out) >= limit:
+            return out
+
+    for note in excluded_notes:
+        if note in seen:
+            continue
+        seen.add(note)
+        out.append(note)
         if len(out) >= limit:
             break
     return out

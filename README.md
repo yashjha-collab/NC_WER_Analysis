@@ -103,7 +103,7 @@ python worker/benchmark_nc_wer.py \
   --turn-align vad \
   --all-models \
   --skip-engines sanas,bvc \
-  --stt-provider cartesia --stt-model ink-whisper --stt-language hi \
+  --stt-provider deepgram --stt-model nova-2 --stt-language hi \
   --output data/runs/CALL_ID_wer_report.json
 ```
 

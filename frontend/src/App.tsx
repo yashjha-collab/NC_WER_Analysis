@@ -381,8 +381,8 @@ export default function App() {
         config: {
           turn_align: "vad",
           segment_mode: "turn",
-          stt_provider: "cartesia",
-          stt_model: "ink-whisper",
+          stt_provider: "deepgram",
+          stt_model: "nova-2",
           stt_language: "hi",
         },
       });

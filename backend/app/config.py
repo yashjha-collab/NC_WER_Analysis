@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     sanas_account_secret: str = ""
     sanas_secure_media: bool = True
 
-    default_stt_provider: str = "cartesia"
-    default_stt_model: str = "ink-whisper"
+    default_stt_provider: str = "deepgram"
+    default_stt_model: str = "nova-2"
     default_stt_language: str = "hi"
     default_turn_align: str = "vad"
     default_nc_strength: float = 0.5

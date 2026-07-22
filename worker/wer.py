@@ -332,10 +332,15 @@ def weighted_wer(turns: list[dict]) -> tuple[float, int]:
     total_edits = 0
     total_ref_words = 0
     for turn in turns:
+        if turn.get("excluded_from_avg"):
+            continue
+        raw_wer = turn.get("wer")
+        if raw_wer is None:
+            continue
         ref_words = tokenize(turn.get("reference", ""))
         if not ref_words:
             continue
-        wer = turn.get("wer", 1.0)
+        wer = float(raw_wer)
         total_edits += int(round(wer * len(ref_words)))
         total_ref_words += len(ref_words)
     if total_ref_words == 0:
@@ -369,10 +374,27 @@ def aggregate_engine_ranking(
             if eng.get("avg_wer") is None:
                 continue
             turns = eng.get("turns") or []
-            w_wer, ref_words = weighted_wer(turns)
+            edits = eng.get("edit_totals") or {}
+            if edits.get("ref_words"):
+                ref_words = int(edits["ref_words"])
+                total_edits = (
+                    int(edits.get("substitutions") or 0)
+                    + int(edits.get("deletions") or 0)
+                    + int(edits.get("insertions") or 0)
+                )
+                w_wer = (total_edits / ref_words) if ref_words else 1.0
+            else:
+                w_wer, ref_words = weighted_wer(turns)
             combined_turn_avg.setdefault(label, []).append(eng["avg_wer"])
             combined_weighted.setdefault(label, []).append((w_wer, ref_words))
-            for reason in eng.get("high_wer_reasons") or []:
+            # Prefer scored-turn reasons over exclusion notices for the banner.
+            scored_reasons = [
+                r
+                for r in (eng.get("high_wer_reasons") or [])
+                if "excluded (" not in str(r).lower()
+            ]
+            fallback_reasons = eng.get("high_wer_reasons") or []
+            for reason in scored_reasons or fallback_reasons:
                 bucket = high_wer_reasons.setdefault(label, [])
                 if reason not in bucket and len(bucket) < 5:
                     bucket.append(str(reason)[:400])

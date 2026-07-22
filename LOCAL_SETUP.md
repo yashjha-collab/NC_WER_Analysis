@@ -134,8 +134,8 @@ SANAS_ACCOUNT_SECRET=...
 SANAS_SECURE_MEDIA=true
 
 # Defaults (safe to keep)
-DEFAULT_STT_PROVIDER=cartesia
-DEFAULT_STT_MODEL=ink-whisper
+DEFAULT_STT_PROVIDER=deepgram
+DEFAULT_STT_MODEL=nova-2
 DEFAULT_STT_LANGUAGE=hi
 DEFAULT_TURN_ALIGN=vad
 DEFAULT_NC_STRENGTH=0.5
@@ -291,8 +291,8 @@ python worker/benchmark_nc_wer.py \
   --turn-align vad \
   --all-models \
   --skip-engines sanas,bvc \
-  --stt-provider cartesia \
-  --stt-model ink-whisper \
+  --stt-provider deepgram \
+  --stt-model nova-2 \
   --stt-language hi \
   --livekit-worker-root "$LIVEKIT_WORKER_ROOT" \
   --cache-dir ./data/cache \
@@ -433,7 +433,7 @@ docker run --rm --platform linux/amd64 \
       --turn-align vad \
       --all-models \
       --skip-engines none,dtln,hush,hecttor,bvc \
-      --stt-provider cartesia --stt-model ink-whisper --stt-language hi \
+      --stt-provider deepgram --stt-model nova-2 --stt-language hi \
       --cache-dir /app/data/cache \
       --livekit-worker-root /livekit-worker \
       --output data/runs/run_1/${CALL_ID}_tier_b_wer_report.json
