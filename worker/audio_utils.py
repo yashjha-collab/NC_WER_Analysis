@@ -140,18 +140,28 @@ def infer_call_start_ts(transcript: dict) -> float:
     return min(timestamps) if timestamps else 0.0
 
 
-def _message_offsets_s(transcript: dict, call_start_ts: float) -> list[float]:
-    """Wall-clock offsets for every message with a valid timestamp."""
-    offsets: list[float] = []
-    for m in transcript.get("messages") or []:
+def _message_timeline(
+    transcript: dict, call_start_ts: float
+) -> list[tuple[float, int, str]]:
+    """Sorted (offset_s, original_index, role) for every timestamped message."""
+    rows: list[tuple[float, int, str]] = []
+    for idx, m in enumerate(transcript.get("messages") or []):
         raw = m.get("createdAt")
         if raw is None or str(raw).strip() == "":
             continue
         try:
-            offsets.append(max(0.0, float(raw) - call_start_ts))
+            offset = max(0.0, float(raw) - call_start_ts)
         except (TypeError, ValueError):
             continue
-    return sorted(offsets)
+        role = str(m.get("role") or "")
+        rows.append((offset, idx, role))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return rows
+
+
+def _message_offsets_s(transcript: dict, call_start_ts: float) -> list[float]:
+    """Wall-clock offsets for every message with a valid timestamp."""
+    return [off for off, _, _ in _message_timeline(transcript, call_start_ts)]
 
 
 def assign_timestamp_segments(
@@ -162,30 +172,86 @@ def assign_timestamp_segments(
     transcript: dict | None = None,
     max_turn_s: float = 6.0,
 ) -> list[UserTurn]:
-    """Slice each user turn using the next *any-role* message as the end bound.
+    """Slice user turns with end-anchored windows from message timestamps.
 
-    Ending only at the next *user* turn pulls in long agent speech windows on
-    composite audio (and noisy silence on human tracks) → STT dumps long
-    hypotheses → WER hundreds of percent.
+    Console ``createdAt`` is typically when the utterance was committed (near
+    speech *end*), and the agent often replies within 20–50ms. The old logic
+    used ``createdAt - 0.25`` as start and ignored any next message within
+    +50ms — so almost every turn fell through to a full ``max_turn_s`` (6s)
+    *forward* window → STT dumped long hypotheses → WER hundreds of percent.
+
+    New rules:
+    - ``end_s`` ≈ this message offset (small pad), clipped by the next message
+      even if it is only a few ms later
+    - ``start_s`` looks back from ``createdAt``, bounded by the previous
+      message and a word-count-based lookback (not a blind 6s of silence)
+    - Same-timestamp user lines get non-overlapping sub-slices by message order
     """
     if not turns:
         return turns
 
-    all_offsets = _message_offsets_s(transcript or {}, call_start_ts)
+    timeline = _message_timeline(transcript or {}, call_start_ts)
+    unused_user_idxs = [
+        i for i, (_off, _idx, role) in enumerate(timeline) if role == "user"
+    ]
+
     padded: list[UserTurn] = []
     for turn in turns:
-        start_s = max(0.0, turn.created_at - call_start_ts - 0.25)
-        # Next message after this turn's timestamp (assistant or user).
-        end_s = start_s + max_turn_s
-        for off in all_offsets:
-            if off > (turn.created_at - call_start_ts) + 0.05:
-                end_s = min(end_s, off - 0.05)
+        turn_off = max(0.0, turn.created_at - call_start_ts)
+        n_words = max(1, len((turn.reference or "").split()))
+        # ~0.45s/word with floor/ceiling — short refs must not pull in seconds
+        # of leading silence (Cartesia/Deepgram hallucinate on quiet audio).
+        lookback_s = min(max_turn_s, max(0.9, 0.45 * n_words + 0.35))
+
+        match_i: int | None = None
+        for ui, ti in enumerate(unused_user_idxs):
+            off, _, _ = timeline[ti]
+            if abs(off - turn_off) < 1e-3:
+                match_i = ti
+                unused_user_idxs.pop(ui)
                 break
-        end_s = min(audio_duration_s, max(start_s + 0.4, end_s))
-        if end_s <= start_s:
-            end_s = min(audio_duration_s, start_s + 1.5)
-        # Hard cap so one bad timestamp can't STT half the call.
+        if match_i is None and unused_user_idxs:
+            match_i = unused_user_idxs.pop(0)
+
+        if match_i is None:
+            prev_off = max(0.0, turn_off - lookback_s)
+            next_off = min(audio_duration_s, turn_off + 0.25)
+        else:
+            prev_off = timeline[match_i - 1][0] if match_i > 0 else 0.0
+            if match_i + 1 < len(timeline):
+                next_off = timeline[match_i + 1][0]
+            else:
+                next_off = min(audio_duration_s, turn_off + 0.5)
+            turn_off = timeline[match_i][0]
+
+        end_pad = 0.12
+        start_pad = 0.02
+        end_s = min(audio_duration_s, turn_off + end_pad)
+        if next_off > turn_off + 1e-4:
+            end_s = min(end_s, max(turn_off, next_off - 0.02))
+
+        start_s = max(0.0, turn_off - lookback_s)
+        if match_i is not None and match_i > 0:
+            start_s = max(start_s, prev_off + start_pad)
+
+        # Same-ts / agent reply in <20ms can collapse the window — keep a
+        # short minimum centered on the commit time so STT still gets audio.
+        min_dur = min(0.45, lookback_s)
+        if end_s - start_s < min_dur:
+            mid = turn_off
+            start_s = max(0.0, mid - min_dur * 0.85)
+            end_s = min(audio_duration_s, start_s + min_dur)
+            if next_off > turn_off + 1e-4:
+                end_s = min(end_s, max(start_s + 0.15, next_off - 0.01))
+            if match_i is not None and match_i > 0:
+                start_s = max(start_s, prev_off + start_pad)
+            if end_s <= start_s:
+                end_s = min(audio_duration_s, start_s + min_dur)
+
         end_s = min(end_s, start_s + max_turn_s, audio_duration_s)
+        if end_s <= start_s:
+            end_s = min(audio_duration_s, start_s + min_dur)
+
         padded.append(
             UserTurn(
                 turn=turn.turn,

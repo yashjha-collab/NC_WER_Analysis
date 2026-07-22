@@ -115,6 +115,9 @@ def score_engine(
     wer_values: list[float] = []
     exact_matches = 0
     total_s = total_d = total_i = total_ref = 0
+    scored_turns = 0
+    excluded_turns = 0
+    seen_ts: set[float] = set()
 
     if args.segment_mode == "full":
         processed = (
@@ -147,19 +150,27 @@ def score_engine(
         total_d += detail["deletions"]
         total_i += detail["insertions"]
         total_ref += detail["n_ref"]
+        scored_turns = 1
         if normalize_text(reference) == normalize_text(hypothesis):
             exact_matches = 1
     else:
         for turn in turns:
             if turn.start_s is None or turn.end_s is None:
                 continue
+
+            # Golden often has two user lines with identical createdAt (manual
+            # edits). The second cannot own a real audio span — exclude it.
+            ts_key = round(float(turn.created_at), 3)
+            duplicate_ts = ts_key in seen_ts
+            seen_ts.add(ts_key)
+
             segment = slice_pcm(pcm, sample_rate, turn.start_s, turn.end_s)
             if len(segment) < int(0.2 * sample_rate):
                 detail = explain_wer(turn.reference, "")
                 detail["reasons"] = [
                     f"Audio slice too short "
                     f"({len(segment) / sample_rate:.2f}s < 0.2s) "
-                    f"→ empty hypothesis; all reference words count as deletions"
+                    f"→ excluded from WER average"
                 ] + detail["reasons"]
                 detail["primary_reason"] = detail["reasons"][0]
                 turn_rows.append(
@@ -172,13 +183,35 @@ def score_engine(
                         "start_s": turn.start_s,
                         "end_s": turn.end_s,
                         "wer_detail": detail,
+                        "excluded_from_avg": True,
+                        "exclude_reason": "too_short",
                     }
                 )
-                wer_values.append(detail["wer"])
-                total_s += detail["substitutions"]
-                total_d += detail["deletions"]
-                total_i += detail["insertions"]
-                total_ref += detail["n_ref"]
+                excluded_turns += 1
+                continue
+
+            if duplicate_ts:
+                detail = explain_wer(turn.reference, "")
+                detail["reasons"] = [
+                    "Duplicate createdAt with an earlier user turn "
+                    "→ no unique audio window; excluded from WER average"
+                ] + detail["reasons"]
+                detail["primary_reason"] = detail["reasons"][0]
+                turn_rows.append(
+                    {
+                        "turn": turn.turn,
+                        "reference": turn.reference,
+                        "hypothesis": "",
+                        "wer": None,
+                        "wer_pct": None,
+                        "start_s": turn.start_s,
+                        "end_s": turn.end_s,
+                        "wer_detail": detail,
+                        "excluded_from_avg": True,
+                        "exclude_reason": "duplicate_timestamp",
+                    }
+                )
+                excluded_turns += 1
                 continue
 
             processed = (
@@ -195,6 +228,36 @@ def score_engine(
                 language=args.stt_language,
             )
             detail = explain_wer(turn.reference, hypothesis)
+            n_ref = int(detail["n_ref"])
+            n_hyp = int(detail["n_hyp"])
+            # Pathological: STT loop / wrong window. Keep in report but do not
+            # let one 6300% turn dominate the call average.
+            pathological = n_ref > 0 and n_hyp > max(8, n_ref * 4)
+            if pathological:
+                detail["reasons"] = [
+                    f"Pathological hypothesis ({n_hyp} hyp vs {n_ref} ref) "
+                    f"— likely wrong window or STT hallucination loop; "
+                    f"excluded from WER average"
+                ] + detail["reasons"]
+                detail["primary_reason"] = detail["reasons"][0]
+
+            row = {
+                "turn": turn.turn,
+                "reference": turn.reference,
+                "hypothesis": hypothesis,
+                "wer": detail["wer"],
+                "wer_pct": detail["wer_pct"],
+                "start_s": turn.start_s,
+                "end_s": turn.end_s,
+                "wer_detail": detail,
+                "excluded_from_avg": pathological,
+                "exclude_reason": "pathological_hypothesis" if pathological else None,
+            }
+            turn_rows.append(row)
+            if pathological:
+                excluded_turns += 1
+                continue
+
             if normalize_text(turn.reference) == normalize_text(hypothesis):
                 exact_matches += 1
             wer_values.append(detail["wer"])
@@ -202,24 +265,25 @@ def score_engine(
             total_d += detail["deletions"]
             total_i += detail["insertions"]
             total_ref += detail["n_ref"]
-            turn_rows.append(
-                {
-                    "turn": turn.turn,
-                    "reference": turn.reference,
-                    "hypothesis": hypothesis,
-                    "wer": detail["wer"],
-                    "wer_pct": detail["wer_pct"],
-                    "start_s": turn.start_s,
-                    "end_s": turn.end_s,
-                    "wer_detail": detail,
-                }
-            )
+            scored_turns += 1
 
-    avg_wer = round(sum(wer_values) / len(wer_values), 4) if wer_values else 1.0
+    micro_wer = (
+        (total_s + total_d + total_i) / total_ref if total_ref > 0 else None
+    )
+    # Prefer micro (word-weighted) as the primary call metric.
+    if micro_wer is not None:
+        avg_wer = round(micro_wer, 4)
+    elif wer_values:
+        avg_wer = round(sum(wer_values) / len(wer_values), 4)
+    else:
+        avg_wer = 1.0
+    turn_avg = (
+        round(sum(wer_values) / len(wer_values), 4) if wer_values else None
+    )
     engine_formula = (
         f"Σ(S+D+I)/ΣN = ({total_s}+{total_d}+{total_i})/{total_ref}"
         if total_ref
-        else "no reference words"
+        else "no scored reference words"
     )
     top_reasons = _top_wer_reasons(turn_rows)
     return {
@@ -227,9 +291,13 @@ def score_engine(
         "nc_model": model,
         "avg_wer": avg_wer,
         "avg_wer_pct": round(avg_wer * 100, 1),
+        "turn_avg_wer": turn_avg,
+        "turn_avg_wer_pct": round(turn_avg * 100, 1) if turn_avg is not None else None,
         "exact_match_rate_pct": round(
-            100.0 * exact_matches / max(1, len(turn_rows)), 1
+            100.0 * exact_matches / max(1, scored_turns), 1
         ),
+        "scored_turns": scored_turns,
+        "excluded_turns": excluded_turns,
         "nonempty_hypothesis_turns": sum(
             1 for t in turn_rows if (t.get("hypothesis") or "").strip()
         ),
@@ -251,7 +319,24 @@ def _top_wer_reasons(turn_rows: list[dict], limit: int = 5) -> list[str]:
     scored: list[tuple[float, str]] = []
     for row in turn_rows:
         detail = row.get("wer_detail") or {}
-        wer = float(row.get("wer") or 0.0)
+        if row.get("excluded_from_avg"):
+            reason = row.get("exclude_reason") or "excluded"
+            primary = detail.get("primary_reason")
+            if not primary:
+                reasons = detail.get("reasons") or []
+                primary = reasons[0] if reasons else None
+            scored.append(
+                (
+                    99.0,
+                    f"Turn {row.get('turn')} excluded ({reason})"
+                    + (f": {primary}" if primary else ""),
+                )
+            )
+            continue
+        raw_wer = row.get("wer")
+        if raw_wer is None:
+            continue
+        wer = float(raw_wer)
         if wer < 0.35:
             continue
         for reason in detail.get("reasons") or []:
