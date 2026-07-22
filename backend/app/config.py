@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     default_stt_provider: str = "deepgram"
     default_stt_model: str = "nova-2"
     default_stt_language: str = "hi"
-    default_turn_align: str = "vad"
+    default_turn_align: str = "forced"
     default_nc_strength: float = 0.5
 
     @property

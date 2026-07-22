@@ -312,6 +312,7 @@ export default function App() {
   const [runName, setRunName] = useState("golden-tier-a");
   const [datasetId, setDatasetId] = useState<number | "">("");
   const [tier, setTier] = useState("tier_a");
+  const [turnAlign, setTurnAlign] = useState("forced");
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
 
   const selectedRun = useMemo(
@@ -379,8 +380,10 @@ export default function App() {
         name: runName,
         tier,
         config: {
-          turn_align: "vad",
-          segment_mode: "turn",
+          // In full mode turn_align is unused; send a valid placeholder since
+          // the worker only accepts timestamp/vad/forced for --turn-align.
+          turn_align: turnAlign === "full" ? "vad" : turnAlign,
+          segment_mode: turnAlign === "full" ? "full" : "turn",
           stt_provider: "deepgram",
           stt_model: "nova-2",
           stt_language: "hi",
@@ -519,6 +522,21 @@ export default function App() {
               </option>
               <option value="tier_b">Tier B — sanas (both models, Linux Docker)</option>
             </select>
+            <label className="block text-sm font-medium text-slate-700">
+              Turn alignment
+              <select
+                className="input mt-1"
+                value={turnAlign}
+                onChange={(e) => setTurnAlign(e.target.value)}
+              >
+                <option value="forced">
+                  Forced alignment — align reference to audio (ignores createdAt)
+                </option>
+                <option value="vad">VAD — trim createdAt windows to speech</option>
+                <option value="timestamp">Timestamp — raw createdAt windows</option>
+                <option value="full">Full recording — transcribe whole call at once</option>
+              </select>
+            </label>
             <button className="btn" onClick={handleCreateRun} disabled={!datasetId}>
               Start run
             </button>

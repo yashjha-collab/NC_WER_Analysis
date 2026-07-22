@@ -322,6 +322,127 @@ def refine_segments_with_vad(
     return refined
 
 
+_MMS_FA_CACHE: dict = {}
+
+
+def _load_mms_fa() -> dict:
+    """Lazily load the torchaudio MMS_FA forced-alignment stack (heavy, cached).
+
+    Requires the optional ``align`` extras (torch, torchaudio, uroman). Raises
+    ImportError if they are not installed so callers can fall back gracefully.
+    """
+    if _MMS_FA_CACHE:
+        return _MMS_FA_CACHE
+
+    import torch  # noqa: PLC0415
+    import torchaudio  # noqa: PLC0415
+    import uroman as uroman_mod  # noqa: PLC0415
+
+    bundle = torchaudio.pipelines.MMS_FA
+    model = bundle.get_model()
+    model.eval()
+    dictionary = bundle.get_dict()
+    _MMS_FA_CACHE.update(
+        torch=torch,
+        model=model,
+        tokenizer=bundle.get_tokenizer(),
+        aligner=bundle.get_aligner(),
+        # Alphabet the aligner understands — drop blank/star and non-letters.
+        allowed={c for c in dictionary if c.isalpha()},
+        uroman=uroman_mod.Uroman(),
+    )
+    return _MMS_FA_CACHE
+
+
+def _normalize_for_alignment(word: str, uroman, allowed: set[str]) -> str:
+    romanized = uroman.romanize_string(word).lower()
+    return "".join(ch for ch in romanized if ch in allowed)
+
+
+def assign_forced_alignment_segments(
+    pcm: np.ndarray,
+    sample_rate: int,
+    turns: list[UserTurn],
+    *,
+    pad_s: float = 0.15,
+) -> list[UserTurn]:
+    """Derive per-turn audio windows via forced alignment of the reference text.
+
+    Unlike ``assign_timestamp_segments`` this does NOT use ``createdAt`` at all:
+    it forces the known reference words onto the audio timeline (torchaudio
+    MMS_FA) and sets each turn's window to span its aligned words. This makes
+    windows robust to missing/duplicate console timestamps.
+    """
+    if not turns:
+        return turns
+
+    data = _load_mms_fa()
+    torch = data["torch"]
+    model = data["model"]
+    tokenizer = data["tokenizer"]
+    aligner = data["aligner"]
+    uroman = data["uroman"]
+    allowed = data["allowed"]
+
+    align_rate = 16_000
+    pcm16 = (
+        resample_pcm(pcm, sample_rate, align_rate)
+        if sample_rate != align_rate
+        else pcm
+    )
+    waveform = torch.from_numpy(np.ascontiguousarray(pcm16)).float().unsqueeze(0)
+
+    words: list[str] = []
+    word_turn: list[int] = []
+    for turn in turns:
+        for raw_word in (turn.reference or "").split():
+            norm = _normalize_for_alignment(raw_word, uroman, allowed)
+            if norm:
+                words.append(norm)
+                word_turn.append(turn.turn)
+
+    if not words:
+        raise RuntimeError("No alignable words in reference after normalization")
+
+    with torch.inference_mode():
+        emission, _ = model(waveform)
+        token_spans = aligner(emission[0], tokenizer(words))
+
+    num_frames = emission.size(1)
+    ratio = waveform.size(1) / num_frames  # audio samples per emission frame
+
+    bounds: dict[int, list[float]] = {}
+    for spans, turn_num in zip(token_spans, word_turn):
+        start_s = ratio * spans[0].start / align_rate
+        end_s = ratio * spans[-1].end / align_rate
+        if turn_num not in bounds:
+            bounds[turn_num] = [start_s, end_s]
+        else:
+            bounds[turn_num][0] = min(bounds[turn_num][0], start_s)
+            bounds[turn_num][1] = max(bounds[turn_num][1], end_s)
+
+    duration_s = len(pcm) / sample_rate
+    aligned: list[UserTurn] = []
+    for turn in turns:
+        if turn.turn in bounds:
+            start_s, end_s = bounds[turn.turn]
+            start_s = max(0.0, start_s - pad_s)
+            end_s = min(duration_s, end_s + pad_s)
+        else:
+            # No alignable words for this turn — keep any prior window.
+            start_s, end_s = turn.start_s, turn.end_s
+        aligned.append(
+            UserTurn(
+                turn=turn.turn,
+                reference=turn.reference,
+                created_at=turn.created_at,
+                start_s=start_s,
+                end_s=end_s,
+            )
+        )
+    return aligned
+
+
 def ensure_audio_for_call(
     *,
     call_log_id: str,

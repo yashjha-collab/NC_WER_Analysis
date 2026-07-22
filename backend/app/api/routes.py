@@ -14,7 +14,6 @@ from app.schemas import (
     CallResultSummary,
     CreateRunRequest,
     DatasetSummary,
-    ImportDatasetRequest,
     RunSummary,
 )
 from app.services import dataset_service, run_service
@@ -98,8 +97,9 @@ async def import_dataset(
 
 @router.post("/datasets/import-path", response_model=DatasetSummary)
 async def import_dataset_path(
-    payload: ImportDatasetRequest,
+    name: str = Form(...),
     path: str = Form(...),
+    description: str | None = Form(None),
     session: AsyncSession = Depends(get_session),
 ) -> DatasetSummary:
     file_path = Path(path)
@@ -108,9 +108,9 @@ async def import_dataset_path(
 
     dataset = await dataset_service.import_manifest_file(
         session,
-        name=payload.name,
+        name=name,
         file_path=file_path,
-        description=payload.description,
+        description=description,
     )
     return DatasetSummary(
         id=dataset.id,
