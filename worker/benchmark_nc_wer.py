@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from worker.audio_utils import (  # noqa: E402
+    assign_forced_alignment_segments,
     assign_timestamp_segments,
     ensure_audio_for_call,
     infer_call_start_ts,
@@ -55,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--turn-align",
-        choices=("timestamp", "vad"),
+        choices=("timestamp", "vad", "forced"),
         default="vad",
     )
     parser.add_argument("--require-user-track", action="store_true")
@@ -388,14 +389,19 @@ def main() -> None:
     if call_start_ts is None:
         call_start_ts = infer_call_start_ts(transcript)
 
-    turns = assign_timestamp_segments(
-        turns,
-        call_start_ts,
-        audio_duration_s,
-        transcript=transcript,
-    )
-    if args.turn_align == "vad":
-        turns = refine_segments_with_vad(pcm, sample_rate, turns)
+    if args.turn_align == "forced":
+        # Forced alignment ignores createdAt entirely — align reference words to
+        # the audio and window each turn around them.
+        turns = assign_forced_alignment_segments(pcm, sample_rate, turns)
+    else:
+        turns = assign_timestamp_segments(
+            turns,
+            call_start_ts,
+            audio_duration_s,
+            transcript=transcript,
+        )
+        if args.turn_align == "vad":
+            turns = refine_segments_with_vad(pcm, sample_rate, turns)
 
     engines = [e.strip() for e in args.engines.split(",") if e.strip()] or None
     skip = {e.strip() for e in args.skip_engines.split(",") if e.strip()}
