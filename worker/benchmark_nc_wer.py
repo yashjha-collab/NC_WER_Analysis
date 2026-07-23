@@ -39,6 +39,15 @@ from worker.wer import explain_wer, normalize_text  # noqa: E402
 
 STT_SAMPLE_RATE = 16_000
 
+# Per-engine defaults — Hush 0.35 from WER sweep (0.5 over-suppresses).
+HUSH_DEFAULT_STRENGTH = 0.35
+
+
+def resolve_nc_strength(engine: str, args: argparse.Namespace) -> float:
+    if engine == "hush":
+        return float(getattr(args, "hush_strength", HUSH_DEFAULT_STRENGTH))
+    return float(args.nc_strength)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark NC engines with WER")
@@ -67,6 +76,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stt-model", default="nova-2")
     parser.add_argument("--stt-language", default="hi")
     parser.add_argument("--nc-strength", type=float, default=0.5)
+    parser.add_argument(
+        "--hush-strength",
+        type=float,
+        default=HUSH_DEFAULT_STRENGTH,
+        help="Hush-specific strength (default 0.35; 0.5 over-suppresses speech)",
+    )
     parser.add_argument("--livekit-worker-root", default="")
     parser.add_argument("--public-url", default="")
     parser.add_argument("--human-url", default="")
@@ -103,12 +118,13 @@ def score_engine(
     turns,
     args: argparse.Namespace,
 ) -> dict:
+    strength = resolve_nc_strength(engine, args)
     processor = None
     if engine != "none":
         processor = build_nc_processor(
             engine,
             model,
-            strength=args.nc_strength,
+            strength=strength,
             worker_root=args.livekit_worker_root or None,
         )
 
@@ -290,6 +306,7 @@ def score_engine(
     return {
         "engine": engine,
         "nc_model": model,
+        "nc_strength": strength,
         "avg_wer": avg_wer,
         "avg_wer_pct": round(avg_wer * 100, 1),
         "turn_avg_wer": turn_avg,

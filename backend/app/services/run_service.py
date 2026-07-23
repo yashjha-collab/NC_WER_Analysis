@@ -75,6 +75,8 @@ def _run_benchmark_subprocess(
         config.get("stt_language", settings.default_stt_language),
         "--nc-strength",
         str(config.get("nc_strength", settings.default_nc_strength)),
+        "--hush-strength",
+        str(config.get("hush_strength", settings.default_hush_strength)),
         "--output",
         str(output),
         "--cache-dir",

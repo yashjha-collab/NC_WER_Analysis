@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     default_stt_language: str = "hi"
     default_turn_align: str = "forced"
     default_nc_strength: float = 0.5
+    default_hush_strength: float = 0.35
 
     @property
     def cors_origins(self) -> list[str]:
