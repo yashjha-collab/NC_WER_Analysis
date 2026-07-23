@@ -28,7 +28,7 @@ from worker.audio_utils import (  # noqa: E402
     resample_pcm,
     slice_pcm,
 )
-from worker.nc_engines import apply_frame_processor, build_nc_processor  # noqa: E402
+from worker.nc_engines import apply_nc, build_nc_processor  # noqa: E402
 from worker.stt import transcribe_pcm  # noqa: E402
 from worker.wer import explain_wer, normalize_text  # noqa: E402
 
@@ -132,8 +132,9 @@ def score_trial(
         )
 
     working = pcm
+    working_sr = sample_rate
     if processor and trial.apply_mode == "full_then_slice":
-        working = apply_frame_processor(pcm, sample_rate, processor)
+        working, working_sr = apply_nc(pcm, sample_rate, trial.engine, processor)
 
     turn_rows = []
     total_s = total_d = total_i = total_ref = 0
@@ -141,6 +142,7 @@ def score_trial(
     excluded = 0
     seen_ts: set[float] = set()
     empty_hyp = 0
+    nc_sr_used = working_sr if trial.engine != "none" else sample_rate
 
     for turn in turns:
         if turn.start_s is None or turn.end_s is None:
@@ -157,8 +159,9 @@ def score_trial(
                 start_s += trim
                 end_s -= trim
 
-        segment = slice_pcm(working, sample_rate, start_s, end_s)
-        if len(segment) < int(0.2 * sample_rate) or duplicate:
+        segment = slice_pcm(working, working_sr, start_s, end_s)
+        min_samples = int(0.2 * working_sr)
+        if len(segment) < min_samples or duplicate:
             excluded += 1
             turn_rows.append(
                 {
@@ -173,9 +176,14 @@ def score_trial(
             continue
 
         if processor and trial.apply_mode == "per_slice":
-            segment = apply_frame_processor(segment, sample_rate, processor)
+            segment, nc_sr_used = apply_nc(
+                segment, sample_rate, trial.engine, processor
+            )
+        else:
+            # full_then_slice already at working_sr; none stays at file sr
+            nc_sr_used = working_sr
 
-        stt_pcm = resample_pcm(segment, sample_rate, STT_SR)
+        stt_pcm = resample_pcm(segment, nc_sr_used, STT_SR)
         hyp = transcribe_pcm(
             stt_pcm,
             STT_SR,
@@ -225,6 +233,8 @@ def score_trial(
         "strength": trial.strength,
         "apply_mode": trial.apply_mode,
         "edge_trim_ms": trial.edge_trim_ms,
+        "file_sample_rate": sample_rate,
+        "nc_sample_rate": nc_sr_used,
         "avg_wer": round(micro, 4),
         "avg_wer_pct": round(micro * 100, 1),
         "scored_turns": scored,

@@ -8,7 +8,23 @@ from typing import Any
 
 import numpy as np
 
+from worker.audio_utils import resample_pcm
 from worker.wer import HECTTOR_MODELS, SANAS_MODELS, TIER_A_VARIANTS, TIER_B_VARIANTS
+
+# Model-native rates. Feeding file SR (often 48 kHz) through DTLN/Hush/Sanas
+# triggers their internal 48↔16 resampler; offline 20 ms chunks then passthrough
+# and destroy STT. Run NC at native rate instead.
+ENGINE_NATIVE_SAMPLE_RATE: dict[str, int] = {
+    "dtln": 16_000,
+    "hush": 16_000,
+    "sanas": 16_000,
+    "hecttor": 48_000,
+}
+
+
+def native_sample_rate(engine: str) -> int | None:
+    """Return the rate the engine's model expects, or None if passthrough."""
+    return ENGINE_NATIVE_SAMPLE_RATE.get(engine.lower())
 
 
 def _setup_livekit_worker(worker_root: str | None) -> Path | None:
@@ -64,6 +80,31 @@ def apply_frame_processor(
     if not out_chunks:
         return pcm
     return np.concatenate(out_chunks)[: len(pcm)]
+
+
+def apply_nc(
+    pcm: np.ndarray,
+    file_sample_rate: int,
+    engine: str,
+    processor: Any | None,
+) -> tuple[np.ndarray, int]:
+    """Run NC at the engine's native sample rate.
+
+    Returns ``(processed_pcm, nc_sample_rate)``. For ``none`` / no processor,
+    returns the input unchanged at ``file_sample_rate``.
+    """
+    if processor is None or engine.lower() == "none":
+        return pcm, file_sample_rate
+
+    native = native_sample_rate(engine)
+    if native is None or native == file_sample_rate:
+        nc_pcm = pcm
+        nc_sr = file_sample_rate
+    else:
+        nc_pcm = resample_pcm(pcm, file_sample_rate, native)
+        nc_sr = native
+
+    return apply_frame_processor(nc_pcm, nc_sr, processor), nc_sr
 
 
 def build_nc_processor(

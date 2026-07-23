@@ -29,9 +29,10 @@ from worker.audio_utils import (  # noqa: E402
     write_transcript_file,
 )
 from worker.nc_engines import (  # noqa: E402
-    apply_frame_processor,
+    apply_nc,
     build_nc_processor,
     list_engine_variants,
+    native_sample_rate,
     skipped_engines,
 )
 from worker.stt import transcribe_pcm  # noqa: E402
@@ -137,12 +138,8 @@ def score_engine(
     seen_ts: set[float] = set()
 
     if args.segment_mode == "full":
-        processed = (
-            apply_frame_processor(pcm, sample_rate, processor)
-            if processor
-            else pcm
-        )
-        stt_pcm = resample_pcm(processed, sample_rate, STT_SAMPLE_RATE)
+        processed, nc_sr = apply_nc(pcm, sample_rate, engine, processor)
+        stt_pcm = resample_pcm(processed, nc_sr, STT_SAMPLE_RATE)
         hypothesis = transcribe_pcm(
             stt_pcm,
             STT_SAMPLE_RATE,
@@ -231,12 +228,8 @@ def score_engine(
                 excluded_turns += 1
                 continue
 
-            processed = (
-                apply_frame_processor(segment, sample_rate, processor)
-                if processor
-                else segment
-            )
-            stt_pcm = resample_pcm(processed, sample_rate, STT_SAMPLE_RATE)
+            processed, nc_sr = apply_nc(segment, sample_rate, engine, processor)
+            stt_pcm = resample_pcm(processed, nc_sr, STT_SAMPLE_RATE)
             hypothesis = transcribe_pcm(
                 stt_pcm,
                 STT_SAMPLE_RATE,
@@ -307,6 +300,12 @@ def score_engine(
         "engine": engine,
         "nc_model": model,
         "nc_strength": strength,
+        "file_sample_rate": sample_rate,
+        "nc_sample_rate": (
+            native_sample_rate(engine) or sample_rate
+            if engine != "none"
+            else sample_rate
+        ),
         "avg_wer": avg_wer,
         "avg_wer_pct": round(avg_wer * 100, 1),
         "turn_avg_wer": turn_avg,
