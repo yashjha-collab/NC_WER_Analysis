@@ -93,6 +93,8 @@ def parse_args() -> argparse.Namespace:
                         help="Scoring mode: wer=plain, itn=ITN-normalized, oiwer=lattice-based, itn+oiwer=both")
     parser.add_argument("--noun-files", nargs="*", default=[],
                         help="JSON files with noun/variation maps (e.g. golden set misinterpretations)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Show per-turn diagnostics with ref vs hyp and error breakdown")
     parser.add_argument("--min-segment-s", type=float, default=0.2,
                         help="Segments shorter than this are excluded pre-STT (default 0.2s)")
     parser.add_argument("--short-empty-s", type=float, default=0.8,
@@ -355,6 +357,7 @@ def score_engine(
         else "no scored reference words"
     )
     top_reasons = _top_wer_reasons(turn_rows)
+    error_cats = _categorize_errors(turn_rows)
     return {
         "engine": engine,
         "nc_model": model,
@@ -386,8 +389,134 @@ def score_engine(
         },
         "high_wer_reasons": top_reasons,
         "primary_reason": top_reasons[0] if top_reasons else None,
+        "error_categories": error_cats,
         "turns": turn_rows,
     }
+
+
+def _categorize_errors(turn_rows: list[dict]) -> dict:
+    """Categorize all WER errors across turns into root-cause buckets."""
+    categories: dict[str, dict] = {
+        "agent_bleed": {"label": "Agent bleed / echo leaking into user window",
+                        "count": 0, "examples": []},
+        "extra_filler": {"label": "Extra filler words in STT (insertions)",
+                         "count": 0, "examples": []},
+        "missing_words": {"label": "STT missed words (deletions)",
+                          "count": 0, "examples": []},
+        "wrong_word": {"label": "Wrong word transcribed (substitutions)",
+                       "count": 0, "examples": []},
+        "number_form": {"label": "Number form mismatch (digit vs spelled-out)",
+                        "count": 0, "examples": []},
+        "cross_script": {"label": "Latin ↔ Devanagari script mismatch",
+                         "count": 0, "examples": []},
+        "empty_stt": {"label": "STT returned empty / silence",
+                      "count": 0, "examples": []},
+        "hallucination": {"label": "STT hallucination / repeating loop",
+                          "count": 0, "examples": []},
+    }
+
+    for row in turn_rows:
+        if row.get("excluded_from_avg"):
+            reason = row.get("exclude_reason", "")
+            if "short_empty" in reason or "too short" in str(row.get("wer_detail", {}).get("reasons", [])):
+                categories["empty_stt"]["count"] += 1
+            elif "pathological" in reason:
+                categories["hallucination"]["count"] += 1
+                categories["hallucination"]["examples"].append(
+                    f"Turn {row['turn']}: hyp has {row.get('wer_detail', {}).get('n_hyp', '?')} words "
+                    f"vs {row.get('wer_detail', {}).get('n_ref', '?')} ref")
+            continue
+
+        detail = row.get("wer_detail", {})
+        ops = detail.get("ops", [])
+        wer_pct = detail.get("wer_pct", 0)
+        if wer_pct == 0:
+            continue
+
+        for op in ops:
+            if op["op"] == "i":
+                hyp_w = op.get("hyp", "")
+                categories["extra_filler"]["count"] += 1
+                if len(categories["extra_filler"]["examples"]) < 10:
+                    categories["extra_filler"]["examples"].append(
+                        f"+'{hyp_w}' (Turn {row['turn']})")
+            elif op["op"] == "d":
+                ref_w = op.get("ref", "")
+                categories["missing_words"]["count"] += 1
+                if len(categories["missing_words"]["examples"]) < 10:
+                    categories["missing_words"]["examples"].append(
+                        f"-'{ref_w}' (Turn {row['turn']})")
+            elif op["op"] == "s":
+                ref_w = str(op.get("ref", ""))
+                hyp_w = str(op.get("hyp", ""))
+                if ref_w.isdigit() or hyp_w.isdigit():
+                    categories["number_form"]["count"] += 1
+                    if len(categories["number_form"]["examples"]) < 10:
+                        categories["number_form"]["examples"].append(
+                            f"'{ref_w}'→'{hyp_w}' (Turn {row['turn']})")
+                else:
+                    ref_dev = any("\u0900" <= c <= "\u097F" for c in ref_w)
+                    hyp_dev = any("\u0900" <= c <= "\u097F" for c in hyp_w)
+                    if ref_dev != hyp_dev:
+                        categories["cross_script"]["count"] += 1
+                        if len(categories["cross_script"]["examples"]) < 10:
+                            categories["cross_script"]["examples"].append(
+                                f"'{ref_w}'→'{hyp_w}' (Turn {row['turn']})")
+                    else:
+                        categories["wrong_word"]["count"] += 1
+                        if len(categories["wrong_word"]["examples"]) < 10:
+                            categories["wrong_word"]["examples"].append(
+                                f"'{ref_w}'→'{hyp_w}' (Turn {row['turn']})")
+
+        n_hyp = detail.get("n_hyp", 0)
+        n_ref = detail.get("n_ref", 0)
+        insertions = detail.get("insertions", 0)
+        if n_ref > 0 and insertions > n_ref:
+            categories["agent_bleed"]["count"] += 1
+            if len(categories["agent_bleed"]["examples"]) < 5:
+                categories["agent_bleed"]["examples"].append(
+                    f"Turn {row['turn']}: {insertions} insertions vs {n_ref} ref words")
+
+        if not (row.get("hypothesis") or "").strip() and n_ref > 0:
+            categories["empty_stt"]["count"] += 1
+
+    active = {k: v for k, v in categories.items() if v["count"] > 0}
+    return active
+
+
+def _format_verbose_turn(row: dict, idx: int) -> list[str]:
+    """Format a single turn for verbose console output."""
+    lines: list[str] = []
+    detail = row.get("wer_detail", {})
+    wer_pct = detail.get("wer_pct", 0)
+    excluded = row.get("excluded_from_avg", False)
+    tag = " [EXCLUDED]" if excluded else ""
+    n_ref = detail.get("n_ref", 0)
+
+    lines.append(f"  Turn {row['turn']:>2d} │ WER {wer_pct:5.1f}%{tag}"
+                 f"  [{row.get('start_s', 0):.1f}s–{row.get('end_s', 0):.1f}s]")
+    lines.append(f"         │ REF: {row.get('reference', '')}")
+    lines.append(f"         │ HYP: {row.get('hypothesis', '') or '(empty)'}")
+
+    ops = detail.get("ops", [])
+    if ops and wer_pct > 0:
+        error_parts: list[str] = []
+        for op in ops:
+            if op["op"] == "s":
+                error_parts.append(f"  '{op.get('ref')}'→'{op.get('hyp')}'")
+            elif op["op"] == "d":
+                error_parts.append(f"  -{op.get('ref')}")
+            elif op["op"] == "i":
+                error_parts.append(f"  +{op.get('hyp')}")
+        if error_parts:
+            lines.append(f"         │ EDITS:{' '.join(error_parts[:8])}"
+                         + (f" (+{len(error_parts)-8} more)" if len(error_parts) > 8 else ""))
+
+    reasons = detail.get("reasons", [])
+    if reasons and wer_pct > 30:
+        lines.append(f"         │ WHY: {reasons[0]}")
+
+    return lines
 
 
 def _top_wer_reasons(turn_rows: list[dict], limit: int = 5) -> list[str]:
@@ -565,6 +694,24 @@ def main() -> None:
                 )
             for extra in (result.get("high_wer_reasons") or [])[1:3]:
                 print(f"  {'':24s} Reason: {extra}", flush=True)
+
+            if args.verbose:
+                print(flush=True)
+                for row in result.get("turns", []):
+                    for line in _format_verbose_turn(row, 0):
+                        print(line, flush=True)
+                print(flush=True)
+                error_cats = result.get("error_categories", {})
+                if error_cats:
+                    print(f"  {'':24s} ┌─ Error Breakdown ─────────────────", flush=True)
+                    for cat_key, cat in sorted(error_cats.items(),
+                                               key=lambda x: x[1]["count"], reverse=True):
+                        examples = cat["examples"][:3]
+                        ex_str = f"  e.g. {', '.join(examples)}" if examples else ""
+                        print(f"  {'':24s} │ {cat['count']:>3d}× {cat['label']}{ex_str}",
+                              flush=True)
+                    print(f"  {'':24s} └───────────────────────────────────", flush=True)
+                print(flush=True)
         except Exception as exc:  # noqa: BLE001
             report["skipped_engines"][label] = str(exc)
             print(f"  {label:24s} SKIP: {exc}", flush=True)
