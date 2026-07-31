@@ -23,10 +23,6 @@ class Settings(BaseSettings):
     deepgram_api_key: str = ""
     cartesia_api_key: str = ""
     hecttor_api_key: str = ""
-    sanas_endpoint: str = ""
-    sanas_account_id: str = ""
-    sanas_account_secret: str = ""
-    sanas_secure_media: bool = True
 
     default_stt_provider: str = "deepgram"
     default_stt_model: str = "nova-2"

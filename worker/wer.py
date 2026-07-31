@@ -79,19 +79,12 @@ HECTTOR_MODELS = (
     "mist-1.0",
 )
 
-SANAS_MODELS = (
-    "AGENTIC_VI_G_NC",
-    "AGENTIC_ST_NC",
-)
-
 TIER_A_VARIANTS = (
     "none",
     "dtln",
     "hush",
     *(f"hecttor/{m}" for m in HECTTOR_MODELS),
 )
-
-TIER_B_VARIANTS = tuple(f"sanas/{m}" for m in SANAS_MODELS)
 
 
 @dataclass
@@ -815,14 +808,12 @@ def aggregate_engine_ranking(
     skipped_acc: dict[str, int] = {}
     skipped_reasons: dict[str, str] = {}
     high_wer_reasons: dict[str, list[str]] = {}
-    intentional_skips = {"bvc", "sanas"}
+    intentional_skips = {"bvc"}
 
     for report in reports:
         for label, reason in (report.get("skipped_engines") or {}).items():
-            # Tier-level skips (bvc/sanas on Tier A) are expected — keep separately.
-            if label in intentional_skips and not label.startswith("hecttor/") and not label.startswith("sanas/"):
-                # "sanas" base key from skipped_engines() helper; real variants are sanas/MODEL
-                if label == "bvc" or label == "sanas":
+            if label in intentional_skips and not label.startswith("hecttor/"):
+                if label == "bvc":
                     skipped_reasons.setdefault(label, str(reason))
                     continue
             skipped_acc[label] = skipped_acc.get(label, 0) + 1

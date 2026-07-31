@@ -21,11 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _tier_skip_engines(tier: str) -> str:
     if tier == "tier_a":
-        return "sanas,bvc"
-    if tier == "tier_b":
-        return "none,dtln,hush,hecttor,bvc"
+        return "bvc"
     if tier == "tier_c":
-        return "none,dtln,hush,hecttor,sanas,bvc"
+        return "none,dtln,hush,hecttor,bvc"
     return "bvc"
 
 
@@ -99,14 +97,6 @@ def _run_benchmark_subprocess(
         env["CARTESIA_API_KEY"] = settings.cartesia_api_key
     if settings.deepgram_api_key:
         env["DEEPGRAM_API_KEY"] = settings.deepgram_api_key
-    if settings.sanas_endpoint:
-        env["SANAS_ENDPOINT"] = settings.sanas_endpoint
-    if settings.sanas_account_id:
-        env["SANAS_ACCOUNT_ID"] = settings.sanas_account_id
-    if settings.sanas_account_secret:
-        env["SANAS_ACCOUNT_SECRET"] = settings.sanas_account_secret
-    env["SANAS_SECURE_MEDIA"] = "true" if settings.sanas_secure_media else "false"
-
     if settings.livekit_worker_root:
         env["LIVEKIT_WORKER_ROOT"] = settings.livekit_worker_root
         worker_src = str(Path(settings.livekit_worker_root) / "src")

@@ -9,15 +9,14 @@ from typing import Any
 import numpy as np
 
 from worker.audio_utils import resample_pcm
-from worker.wer import HECTTOR_MODELS, SANAS_MODELS, TIER_A_VARIANTS, TIER_B_VARIANTS
+from worker.wer import HECTTOR_MODELS, TIER_A_VARIANTS
 
-# Model-native rates. Feeding file SR (often 48 kHz) through DTLN/Hush/Sanas
+# Model-native rates. Feeding file SR (often 48 kHz) through DTLN/Hush
 # triggers their internal 48↔16 resampler; offline 20 ms chunks then passthrough
 # and destroy STT. Run NC at native rate instead.
 ENGINE_NATIVE_SAMPLE_RATE: dict[str, int] = {
     "dtln": 16_000,
     "hush": 16_000,
-    "sanas": 16_000,
     "hecttor": 48_000,
 }
 
@@ -160,14 +159,6 @@ def build_nc_processor(
             enhancer_weight=strength,
         )
 
-    if engine == "sanas":
-        from services.sanas_enhancer import SanasEnhancer
-
-        return SanasEnhancer(
-            model_name=model or SANAS_MODELS[0],
-            strength=strength,
-        )
-
     raise ValueError(f"Unknown NC engine: {engine}")
 
 
@@ -177,7 +168,7 @@ def list_engine_variants(
     engines: list[str] | None,
     skip_engines: set[str],
 ) -> list[tuple[str, str, str | None]]:
-    requested = set(engines or ["none", "dtln", "hush", "hecttor", "sanas"])
+    requested = set(engines or ["none", "dtln", "hush", "hecttor"])
     requested -= skip_engines
     variants: list[tuple[str, str, str | None]] = []
 
@@ -191,10 +182,6 @@ def list_engine_variants(
         models = HECTTOR_MODELS if all_models else (HECTTOR_MODELS[0],)
         for model in models:
             variants.append((f"hecttor/{model}", "hecttor", model))
-    if "sanas" in requested:
-        models = SANAS_MODELS if all_models else (SANAS_MODELS[0],)
-        for model in models:
-            variants.append((f"sanas/{model}", "sanas", model))
     if "bvc" in requested:
         variants.append(("bvc", "bvc", None))
 
@@ -202,8 +189,6 @@ def list_engine_variants(
 
 
 def expected_labels_for_tier(tier: str) -> list[str]:
-    if tier == "tier_b":
-        return list(TIER_B_VARIANTS)
     return list(TIER_A_VARIANTS)
 
 
@@ -213,9 +198,5 @@ def skipped_engines(skip_engines: set[str]) -> dict[str, str]:
         skips["bvc"] = (
             "BVC/Krisp runs on live LiveKit audio tracks only — "
             "cannot process offline recordings in this benchmark"
-        )
-    if "sanas" in skip_engines:
-        skips["sanas"] = (
-            "Sanas skipped for this tier — run on Linux x86_64 (Docker tier B)"
         )
     return skips
