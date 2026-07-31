@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
 import sys
@@ -95,6 +97,8 @@ def parse_args() -> argparse.Namespace:
                         help="JSON files with noun/variation maps (e.g. golden set misinterpretations)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Show per-turn diagnostics with ref vs hyp and error breakdown")
+    parser.add_argument("--error-report", default="",
+                        help="Export error breakdown as CSV to this path (e.g. errors.csv)")
     parser.add_argument("--min-segment-s", type=float, default=0.2,
                         help="Segments shorter than this are excluded pre-STT (default 0.2s)")
     parser.add_argument("--short-empty-s", type=float, default=0.8,
@@ -722,6 +726,120 @@ def main() -> None:
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"Wrote report → {output_path}", flush=True)
+
+    error_report_path = args.error_report
+    if error_report_path:
+        _write_error_csv(report, Path(error_report_path))
+        print(f"Wrote error report → {error_report_path}", flush=True)
+
+
+def _write_error_csv(report: dict, path: Path) -> None:
+    """Export a per-error CSV with turn context and categorization."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    call_id = report.get("call_id", "")
+    stt = report.get("stt", {})
+    stt_label = f"{stt.get('provider', '')} {stt.get('model', '')} ({stt.get('language', '')})"
+
+    rows: list[dict] = []
+    for eng_label, eng_data in report.get("engines", {}).items():
+        for turn_row in eng_data.get("turns", []):
+            turn_num = turn_row.get("turn", "")
+            reference = turn_row.get("reference", "")
+            hypothesis = turn_row.get("hypothesis", "")
+            detail = turn_row.get("wer_detail", {})
+            wer_pct = detail.get("wer_pct", 0)
+            start_s = turn_row.get("start_s", "")
+            end_s = turn_row.get("end_s", "")
+            excluded = turn_row.get("excluded_from_avg", False)
+            exclude_reason = turn_row.get("exclude_reason", "")
+            reasons = detail.get("reasons", [])
+            primary_reason = reasons[0] if reasons else ""
+
+            if wer_pct == 0 and not excluded:
+                rows.append({
+                    "call_id": call_id,
+                    "engine": eng_label,
+                    "stt": stt_label,
+                    "turn": turn_num,
+                    "start_s": f"{start_s:.1f}" if isinstance(start_s, float) else start_s,
+                    "end_s": f"{end_s:.1f}" if isinstance(end_s, float) else end_s,
+                    "wer_pct": wer_pct,
+                    "reference": reference,
+                    "hypothesis": hypothesis,
+                    "error_type": "",
+                    "error_detail": "",
+                    "excluded": "",
+                    "reason": "Perfect match",
+                })
+                continue
+
+            if excluded:
+                rows.append({
+                    "call_id": call_id,
+                    "engine": eng_label,
+                    "stt": stt_label,
+                    "turn": turn_num,
+                    "start_s": f"{start_s:.1f}" if isinstance(start_s, float) else start_s,
+                    "end_s": f"{end_s:.1f}" if isinstance(end_s, float) else end_s,
+                    "wer_pct": wer_pct,
+                    "reference": reference,
+                    "hypothesis": hypothesis,
+                    "error_type": "excluded",
+                    "error_detail": exclude_reason,
+                    "excluded": "yes",
+                    "reason": primary_reason,
+                })
+                continue
+
+            ops = detail.get("ops", [])
+            for op in ops:
+                if op["op"] == "c":
+                    continue
+                ref_w = str(op.get("ref", ""))
+                hyp_w = str(op.get("hyp", ""))
+
+                if op["op"] == "s":
+                    if ref_w.isdigit() or hyp_w.isdigit():
+                        etype = "number_form_mismatch"
+                    else:
+                        ref_dev = any("\u0900" <= c <= "\u097F" for c in ref_w)
+                        hyp_dev = any("\u0900" <= c <= "\u097F" for c in hyp_w)
+                        etype = "cross_script" if ref_dev != hyp_dev else "substitution"
+                    detail_str = f"'{ref_w}' → '{hyp_w}'"
+                elif op["op"] == "d":
+                    etype = "deletion"
+                    detail_str = f"missing '{ref_w}'"
+                elif op["op"] == "i":
+                    etype = "insertion"
+                    detail_str = f"extra '{hyp_w}'"
+                else:
+                    continue
+
+                rows.append({
+                    "call_id": call_id,
+                    "engine": eng_label,
+                    "stt": stt_label,
+                    "turn": turn_num,
+                    "start_s": f"{start_s:.1f}" if isinstance(start_s, float) else start_s,
+                    "end_s": f"{end_s:.1f}" if isinstance(end_s, float) else end_s,
+                    "wer_pct": wer_pct,
+                    "reference": reference,
+                    "hypothesis": hypothesis,
+                    "error_type": etype,
+                    "error_detail": detail_str,
+                    "excluded": "",
+                    "reason": primary_reason,
+                })
+
+    fieldnames = [
+        "call_id", "engine", "stt", "turn", "start_s", "end_s",
+        "wer_pct", "reference", "hypothesis",
+        "error_type", "error_detail", "excluded", "reason",
+    ]
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 if __name__ == "__main__":
