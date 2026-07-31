@@ -443,6 +443,201 @@ def assign_forced_alignment_segments(
     return aligned
 
 
+_SILERO_CACHE: dict = {}
+
+
+def _load_silero_vad():
+    if "model" not in _SILERO_CACHE:
+        from silero_vad import load_silero_vad
+        _SILERO_CACHE["model"] = load_silero_vad()
+    return _SILERO_CACHE["model"]
+
+
+def _silero_speech_islands(
+    pcm: np.ndarray,
+    sample_rate: int,
+    *,
+    threshold: float = 0.5,
+    min_speech_ms: int = 80,
+    min_silence_ms: int = 80,
+) -> list[tuple[float, float]]:
+    import torch
+    from silero_vad import get_speech_timestamps
+
+    model = _load_silero_vad()
+    pcm16 = resample_pcm(pcm, sample_rate, 16_000) if sample_rate != 16_000 else pcm
+    wav = torch.from_numpy(np.ascontiguousarray(pcm16)).float()
+    ts = get_speech_timestamps(
+        wav,
+        model,
+        threshold=threshold,
+        sampling_rate=16_000,
+        min_speech_duration_ms=min_speech_ms,
+        min_silence_duration_ms=min_silence_ms,
+        return_seconds=True,
+    )
+    return [(float(t["start"]), float(t["end"])) for t in ts]
+
+
+def tighten_with_silero_vad(
+    pcm: np.ndarray,
+    sample_rate: int,
+    turns: list[UserTurn],
+    *,
+    lead_pad_s: float = 0.15,
+    trail_pad_s: float = 0.12,
+) -> list[UserTurn]:
+    """Trim leading/trailing silence from FA windows using Silero VAD.
+
+    Only shrinks windows inward — never expands them. For each turn, finds the
+    earliest speech onset and latest speech offset among VAD islands that
+    overlap the existing FA window, then trims. Falls back to the original
+    window when no speech is detected within it.
+    """
+    if not turns:
+        return turns
+
+    islands = _silero_speech_islands(pcm, sample_rate, threshold=0.40)
+    if not islands:
+        return turns
+
+    duration_s = len(pcm) / sample_rate
+    tightened: list[UserTurn] = []
+
+    for turn in turns:
+        if turn.start_s is None or turn.end_s is None:
+            tightened.append(turn)
+            continue
+
+        first_onset: float | None = None
+        last_offset: float | None = None
+        for s, e in islands:
+            if s >= turn.end_s:
+                break
+            if e <= turn.start_s:
+                continue
+            clip_s = max(s, turn.start_s)
+            clip_e = min(e, turn.end_s)
+            if clip_e - clip_s < 0.03:
+                continue
+            if first_onset is None:
+                first_onset = clip_s
+            last_offset = clip_e
+
+        if first_onset is None or last_offset is None:
+            tightened.append(turn)
+            continue
+
+        new_start = max(0.0, first_onset - lead_pad_s)
+        new_end = min(duration_s, last_offset + trail_pad_s)
+
+        new_start = max(new_start, turn.start_s)
+        new_end = min(new_end, turn.end_s)
+
+        if new_end - new_start < 0.20:
+            tightened.append(turn)
+            continue
+
+        tightened.append(
+            UserTurn(
+                turn=turn.turn,
+                reference=turn.reference,
+                created_at=turn.created_at,
+                start_s=new_start,
+                end_s=new_end,
+            )
+        )
+
+    return tightened
+
+
+def tighten_with_silero_vad_v5(
+    pcm: np.ndarray,
+    sample_rate: int,
+    turns: list[UserTurn],
+    *,
+    lead_pad_s: float = 0.20,
+    trail_pad_s: float = 0.15,
+    wide_threshold_s: float = 3.0,
+    split_gap_s: float = 0.8,
+) -> list[UserTurn]:
+    """Gap-splitting VAD tightening for wide FA windows.
+
+    For narrow FA windows (< wide_threshold_s), behaves like v4 (trim edges).
+    For wide windows, groups speech islands inside the window and picks the
+    longest group — the idea being that agent bleed in a wide window appears as
+    a separate island group separated by a speaker-handoff gap.
+    """
+    if not turns:
+        return turns
+
+    islands = _silero_speech_islands(pcm, sample_rate, threshold=0.40)
+    if not islands:
+        return turns
+
+    duration_s = len(pcm) / sample_rate
+    tightened: list[UserTurn] = []
+
+    for turn in turns:
+        if turn.start_s is None or turn.end_s is None:
+            tightened.append(turn)
+            continue
+
+        fa_width = turn.end_s - turn.start_s
+
+        overlapping: list[tuple[float, float]] = []
+        for s, e in islands:
+            if s >= turn.end_s:
+                break
+            if e <= turn.start_s:
+                continue
+            clip_s = max(s, turn.start_s)
+            clip_e = min(e, turn.end_s)
+            if clip_e - clip_s < 0.03:
+                continue
+            overlapping.append((clip_s, clip_e))
+
+        if not overlapping:
+            tightened.append(turn)
+            continue
+
+        if fa_width < wide_threshold_s:
+            chosen_s = overlapping[0][0]
+            chosen_e = overlapping[-1][1]
+        else:
+            groups: list[list[float]] = [list(overlapping[0])]
+            for s, e in overlapping[1:]:
+                if s - groups[-1][1] <= split_gap_s:
+                    groups[-1][1] = max(groups[-1][1], e)
+                else:
+                    groups.append([s, e])
+
+            if len(groups) == 1:
+                chosen_s, chosen_e = groups[0]
+            else:
+                best = max(groups, key=lambda g: g[1] - g[0])
+                chosen_s, chosen_e = best
+
+        new_start = max(turn.start_s, chosen_s - lead_pad_s)
+        new_end = min(turn.end_s, chosen_e + trail_pad_s)
+
+        if new_end - new_start < 0.20:
+            tightened.append(turn)
+            continue
+
+        tightened.append(
+            UserTurn(
+                turn=turn.turn,
+                reference=turn.reference,
+                created_at=turn.created_at,
+                start_s=new_start,
+                end_s=new_end,
+            )
+        )
+
+    return tightened
+
+
 def ensure_audio_for_call(
     *,
     call_log_id: str,

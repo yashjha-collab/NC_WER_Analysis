@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CallRecord, Dataset
@@ -39,12 +39,8 @@ async def import_manifest_file(
         dataset = existing
         dataset.description = description
         dataset.source_path = str(file_path)
-        # Delete existing rows via an explicit query — accessing the lazy
-        # `dataset.calls` relationship here raises MissingGreenlet under the
-        # async engine.
-        await session.execute(
-            delete(CallRecord).where(CallRecord.dataset_id == dataset.id)
-        )
+        for call in list(dataset.calls):
+            await session.delete(call)
     else:
         dataset = Dataset(
             name=name,

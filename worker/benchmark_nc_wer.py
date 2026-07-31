@@ -26,6 +26,8 @@ from worker.audio_utils import (  # noqa: E402
     refine_segments_with_vad,
     resample_pcm,
     slice_pcm,
+    tighten_with_silero_vad,
+    tighten_with_silero_vad_v5,
     write_transcript_file,
 )
 from worker.nc_engines import (  # noqa: E402
@@ -36,7 +38,13 @@ from worker.nc_engines import (  # noqa: E402
     skipped_engines,
 )
 from worker.stt import transcribe_pcm  # noqa: E402
-from worker.wer import explain_wer, normalize_text  # noqa: E402
+from worker.wer import (  # noqa: E402
+    explain_oiwer,
+    explain_wer,
+    load_noun_files,
+    normalize_text,
+    normalize_text_itn,
+)
 
 STT_SAMPLE_RATE = 16_000
 
@@ -70,12 +78,25 @@ def parse_args() -> argparse.Namespace:
         default="vad",
     )
     parser.add_argument("--require-user-track", action="store_true")
+    parser.add_argument("--no-vad-tighten", action="store_true",
+                        help="Skip Silero VAD tightening after forced alignment")
+    parser.add_argument("--vad-version", default="v4", choices=["v4", "v5"],
+                        help="Silero VAD tightening version (v4=shrink-only, v5=gap-split)")
     parser.add_argument("--all-models", action="store_true")
     parser.add_argument("--engines", default="")
     parser.add_argument("--skip-engines", default="bvc")
     parser.add_argument("--stt-provider", default="deepgram")
     parser.add_argument("--stt-model", default="nova-2")
     parser.add_argument("--stt-language", default="hi")
+    parser.add_argument("--scoring", default="wer",
+                        choices=["wer", "itn", "oiwer", "itn+oiwer"],
+                        help="Scoring mode: wer=plain, itn=ITN-normalized, oiwer=lattice-based, itn+oiwer=both")
+    parser.add_argument("--noun-files", nargs="*", default=[],
+                        help="JSON files with noun/variation maps (e.g. golden set misinterpretations)")
+    parser.add_argument("--min-segment-s", type=float, default=0.2,
+                        help="Segments shorter than this are excluded pre-STT (default 0.2s)")
+    parser.add_argument("--short-empty-s", type=float, default=0.8,
+                        help="If segment < this AND STT returns empty, exclude instead of scoring 100%% WER")
     parser.add_argument("--nc-strength", type=float, default=0.5)
     parser.add_argument(
         "--hush-strength",
@@ -179,11 +200,13 @@ def score_engine(
             seen_ts.add(ts_key)
 
             segment = slice_pcm(pcm, sample_rate, turn.start_s, turn.end_s)
-            if len(segment) < int(0.2 * sample_rate):
+            seg_dur_s = len(segment) / sample_rate
+            min_seg = getattr(args, "min_segment_s", 0.5)
+            if seg_dur_s < min_seg:
                 detail = explain_wer(turn.reference, "")
                 detail["reasons"] = [
                     f"Audio slice too short "
-                    f"({len(segment) / sample_rate:.2f}s < 0.2s) "
+                    f"({seg_dur_s:.2f}s < {min_seg}s) "
                     f"→ excluded from WER average"
                 ] + detail["reasons"]
                 detail["primary_reason"] = detail["reasons"][0]
@@ -237,11 +260,47 @@ def score_engine(
                 model=args.stt_model,
                 language=args.stt_language,
             )
-            detail = explain_wer(turn.reference, hypothesis)
+
+            short_empty_thresh = getattr(args, "short_empty_s", 0.8)
+            if not hypothesis.strip() and seg_dur_s < short_empty_thresh:
+                detail = explain_wer(turn.reference, "")
+                detail["reasons"] = [
+                    f"Short segment ({seg_dur_s:.2f}s < {short_empty_thresh}s) "
+                    f"with empty STT → excluded from WER average"
+                ] + detail["reasons"]
+                detail["primary_reason"] = detail["reasons"][0]
+                turn_rows.append(
+                    {
+                        "turn": turn.turn,
+                        "reference": turn.reference,
+                        "hypothesis": "",
+                        "wer": detail["wer"],
+                        "wer_pct": detail["wer_pct"],
+                        "start_s": turn.start_s,
+                        "end_s": turn.end_s,
+                        "wer_detail": detail,
+                        "excluded_from_avg": True,
+                        "exclude_reason": "short_empty",
+                    }
+                )
+                excluded_turns += 1
+                continue
+
+            scoring = getattr(args, "scoring", "wer")
+            if scoring == "itn+oiwer":
+                ref_itn = normalize_text_itn(turn.reference)
+                hyp_itn = normalize_text_itn(hypothesis)
+                detail = explain_oiwer(ref_itn, hyp_itn)
+            elif scoring == "oiwer":
+                detail = explain_oiwer(turn.reference, hypothesis)
+            elif scoring == "itn":
+                ref_itn = normalize_text_itn(turn.reference)
+                hyp_itn = normalize_text_itn(hypothesis)
+                detail = explain_wer(ref_itn, hyp_itn)
+            else:
+                detail = explain_wer(turn.reference, hypothesis)
             n_ref = int(detail["n_ref"])
             n_hyp = int(detail["n_hyp"])
-            # Pathological: STT loop / wrong window. Keep in report but do not
-            # let one 6300% turn dominate the call average.
             pathological = n_ref > 0 and n_hyp > max(8, n_ref * 4)
             if pathological:
                 detail["reasons"] = [
@@ -389,6 +448,10 @@ def main() -> None:
     load_dotenv(REPO_ROOT / ".env")
     args = parse_args()
 
+    if args.noun_files:
+        loaded = load_noun_files(args.noun_files)
+        print(f"Loaded {len(loaded)} nouns from {len(args.noun_files)} file(s)")
+
     transcript_path = Path(args.transcript)
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
     turns = load_user_turns(transcript)
@@ -406,9 +469,12 @@ def main() -> None:
         call_start_ts = infer_call_start_ts(transcript)
 
     if args.turn_align == "forced":
-        # Forced alignment ignores createdAt entirely — align reference words to
-        # the audio and window each turn around them.
         turns = assign_forced_alignment_segments(pcm, sample_rate, turns)
+        if not args.no_vad_tighten:
+            if args.vad_version == "v5":
+                turns = tighten_with_silero_vad_v5(pcm, sample_rate, turns)
+            else:
+                turns = tighten_with_silero_vad(pcm, sample_rate, turns)
     else:
         turns = assign_timestamp_segments(
             turns,
