@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     livekit_worker_root: str = ""
 
     deepgram_api_key: str = ""
-    cartesia_api_key: str = ""
     hecttor_api_key: str = ""
 
     default_stt_provider: str = "deepgram"

@@ -93,8 +93,6 @@ def _run_benchmark_subprocess(
     env = {**os.environ}
     if settings.hecttor_api_key:
         env["HECTTOR_API_KEY"] = settings.hecttor_api_key
-    if settings.cartesia_api_key:
-        env["CARTESIA_API_KEY"] = settings.cartesia_api_key
     if settings.deepgram_api_key:
         env["DEEPGRAM_API_KEY"] = settings.deepgram_api_key
     if settings.livekit_worker_root:
