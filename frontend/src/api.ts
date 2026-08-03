@@ -80,6 +80,28 @@ export type Diagnostics = {
   hints?: string[];
 };
 
+export type SweepResult = {
+  engine: string;
+  strength: number;
+  calls: number;
+  word_weighted_wer_pct: number | null;
+  turn_avg_wer_pct: number | null;
+  substitutions?: number;
+  deletions?: number;
+  insertions?: number;
+  ref_words?: number;
+  error?: string;
+};
+
+export type SweepResponse = {
+  dataset_id: number;
+  dataset_name: string;
+  total_calls: number;
+  turn_align: string;
+  stt: { provider: string; model: string; language: string };
+  results: SweepResult[];
+};
+
 export const api = {
   health: () => request<{ status: string }>("/health"),
   diagnostics: () => request<Diagnostics>("/diagnostics"),
@@ -109,6 +131,20 @@ export const api = {
     config?: Record<string, unknown>;
   }) =>
     request<Run>("/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  strengthSweep: (payload: {
+    dataset_id: number;
+    dtln_strengths: number[];
+    hush_strengths: number[];
+    hecttor_strengths: number[];
+    hecttor_models?: string[];
+    max_calls?: number;
+    turn_align?: string;
+  }) =>
+    request<SweepResponse>("/strength-sweep", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

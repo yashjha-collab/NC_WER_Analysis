@@ -50,3 +50,13 @@ class CallResultSummary(BaseModel):
     status: str
     report_json: dict | None = None
     error_message: str | None = None
+
+
+class StrengthSweepRequest(BaseModel):
+    dataset_id: int
+    dtln_strengths: list[float] = Field(default_factory=list)
+    hush_strengths: list[float] = Field(default_factory=list)
+    hecttor_strengths: list[float] = Field(default_factory=list)
+    hecttor_models: list[str] = Field(default_factory=lambda: ["coda-1.0"])
+    max_calls: int | None = None
+    turn_align: str = "forced"

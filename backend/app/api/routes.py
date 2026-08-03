@@ -15,6 +15,7 @@ from app.schemas import (
     CreateRunRequest,
     DatasetSummary,
     RunSummary,
+    StrengthSweepRequest,
 )
 from app.services import dataset_service, run_service
 
@@ -262,6 +263,36 @@ async def get_run(
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
+
+
+@router.post("/strength-sweep")
+async def strength_sweep(
+    payload: StrengthSweepRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    if not (payload.dtln_strengths or payload.hush_strengths or payload.hecttor_strengths):
+        raise HTTPException(status_code=400, detail="Select at least one engine/strength")
+
+    if settings.livekit_worker_root:
+        import os
+        os.environ["LIVEKIT_WORKER_ROOT"] = settings.livekit_worker_root
+        if settings.hecttor_api_key:
+            os.environ["HECTTOR_API_KEY"] = settings.hecttor_api_key
+
+    try:
+        result = await run_service.run_strength_sweep(
+            session,
+            dataset_id=payload.dataset_id,
+            dtln_strengths=payload.dtln_strengths,
+            hush_strengths=payload.hush_strengths,
+            hecttor_strengths=payload.hecttor_strengths,
+            hecttor_models=payload.hecttor_models,
+            max_calls=payload.max_calls,
+            turn_align=payload.turn_align,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}/results", response_model=list[CallResultSummary])
