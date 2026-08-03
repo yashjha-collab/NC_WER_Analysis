@@ -299,75 +299,13 @@ function CallEngineTable({ report }: { report: Record<string, unknown> }) {
 const DTLN_HUSH_STRENGTHS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
 const HECTTOR_STRENGTHS = [0.25, 0.5, 0.75, 1.0];
 
-function StrengthSweepSection({ datasets }: { datasets: Dataset[] }) {
-  const [sweepDatasetId, setSweepDatasetId] = useState<number | "">("");
-  const [sweepTurnAlign, setSweepTurnAlign] = useState("forced");
-
-  const [dtlnSelected, setDtlnSelected] = useState<Set<number>>(new Set());
-  const [dtlnAll, setDtlnAll] = useState(false);
-  const [hushSelected, setHushSelected] = useState<Set<number>>(new Set());
-  const [hushAll, setHushAll] = useState(false);
-
-  const [hecttorSelected, setHecttorSelected] = useState<Set<number>>(new Set());
-  const [hecttorAll, setHecttorAll] = useState(false);
-
-  const [sweepRunning, setSweepRunning] = useState(false);
-  const [sweepError, setSweepError] = useState<string | null>(null);
-  const [sweepResult, setSweepResult] = useState<SweepResponse | null>(null);
-
-  const toggleStrength = (
-    set: Set<number>,
-    setter: (s: Set<number>) => void,
-    val: number,
-  ) => {
-    const next = new Set(set);
-    if (next.has(val)) next.delete(val);
-    else next.add(val);
-    setter(next);
-  };
-
-  const effectiveDtln = dtlnAll ? DTLN_HUSH_STRENGTHS : [...dtlnSelected].sort((a, b) => a - b);
-  const effectiveHush = hushAll ? DTLN_HUSH_STRENGTHS : [...hushSelected].sort((a, b) => a - b);
-  const effectiveHecttor = hecttorAll ? HECTTOR_STRENGTHS : [...hecttorSelected].sort((a, b) => a - b);
-
-  const handleRunSweep = async () => {
-    if (!sweepDatasetId) return;
-    if (!effectiveDtln.length && !effectiveHush.length && !effectiveHecttor.length) {
-      setSweepError("Select at least one engine and strength.");
-      return;
-    }
-    setSweepRunning(true);
-    setSweepError(null);
-    setSweepResult(null);
-    try {
-      const res = await api.strengthSweep({
-        dataset_id: Number(sweepDatasetId),
-        dtln_strengths: effectiveDtln,
-        hush_strengths: effectiveHush,
-        hecttor_strengths: effectiveHecttor,
-        turn_align: sweepTurnAlign,
-      });
-      setSweepResult(res);
-    } catch (err) {
-      setSweepError(err instanceof Error ? err.message : "Sweep failed");
-    } finally {
-      setSweepRunning(false);
-    }
-  };
-
-  const handleDownloadJSON = () => {
-    if (!sweepResult) return;
-    const blob = new Blob([JSON.stringify(sweepResult, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `strength_sweep_${sweepResult.dataset_name || sweepResult.dataset_id}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
+function SweepResultsTable({
+  sweepResult,
+  onDownload,
+}: {
+  sweepResult: SweepResponse;
+  onDownload: () => void;
+}) {
   const pivotTable = useMemo(() => {
     if (!sweepResult?.results?.length) return null;
     const engines = [...new Set(sweepResult.results.map((r) => r.engine))];
@@ -379,289 +317,127 @@ function StrengthSweepSection({ datasets }: { datasets: Dataset[] }) {
     return { engines, strengths, lookup };
   }, [sweepResult]);
 
+  if (!pivotTable) return null;
+
   return (
-    <section className="card mt-6">
-      <h2 className="mb-4 text-lg font-medium">Strength Sweep</h2>
-      <p className="mb-4 text-sm text-slate-600">
-        Compare WER at different NC strengths for DTLN, Hush, and Hecttor.
-      </p>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div>
-          <label className="block text-sm font-medium text-slate-700">
-            Dataset
-            <select
-              className="input mt-1"
-              value={sweepDatasetId}
-              onChange={(e) =>
-                setSweepDatasetId(e.target.value ? Number(e.target.value) : "")
-              }
-            >
-              <option value="">Select dataset</option>
-              {datasets.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name} ({d.call_count})
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-slate-700">
-            Turn alignment
-            <select
-              className="input mt-1"
-              value={sweepTurnAlign}
-              onChange={(e) => setSweepTurnAlign(e.target.value)}
-            >
-              <option value="forced">Forced alignment</option>
-              <option value="vad">VAD</option>
-              <option value="timestamp">Timestamp</option>
-            </select>
-          </label>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <div className="rounded-lg border border-slate-200 p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium">DTLN strengths</span>
-            <label className="flex items-center gap-1.5 text-xs">
-              <input
-                type="checkbox"
-                checked={dtlnAll}
-                onChange={(e) => setDtlnAll(e.target.checked)}
-              />
-              All
-            </label>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {DTLN_HUSH_STRENGTHS.map((s) => (
-              <button
-                key={s}
-                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                  dtlnAll || dtlnSelected.has(s)
-                    ? "bg-slate-900 text-white"
-                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                }`}
-                onClick={() => {
-                  if (!dtlnAll) toggleStrength(dtlnSelected, setDtlnSelected, s);
-                }}
-                disabled={dtlnAll}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-
-          <div className="mt-3 mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium">Hush strengths</span>
-            <label className="flex items-center gap-1.5 text-xs">
-              <input
-                type="checkbox"
-                checked={hushAll}
-                onChange={(e) => setHushAll(e.target.checked)}
-              />
-              All
-            </label>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {DTLN_HUSH_STRENGTHS.map((s) => (
-              <button
-                key={s}
-                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                  hushAll || hushSelected.has(s)
-                    ? "bg-slate-900 text-white"
-                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                }`}
-                onClick={() => {
-                  if (!hushAll) toggleStrength(hushSelected, setHushSelected, s);
-                }}
-                disabled={hushAll}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-slate-200 p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium">Hecttor strengths</span>
-            <label className="flex items-center gap-1.5 text-xs">
-              <input
-                type="checkbox"
-                checked={hecttorAll}
-                onChange={(e) => setHecttorAll(e.target.checked)}
-              />
-              All
-            </label>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {HECTTOR_STRENGTHS.map((s) => (
-              <button
-                key={s}
-                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                  hecttorAll || hecttorSelected.has(s)
-                    ? "bg-slate-900 text-white"
-                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                }`}
-                onClick={() => {
-                  if (!hecttorAll) toggleStrength(hecttorSelected, setHecttorSelected, s);
-                }}
-                disabled={hecttorAll}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-          <p className="mt-2 text-[11px] text-slate-500">
-            Models: coda-1.0 (default). Runs all Hecttor models configured in the worker.
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-4 flex items-center gap-3">
+    <div className="mt-6">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-medium text-slate-700">
+          Strength sweep — {sweepResult.dataset_name} ({sweepResult.total_calls} calls,
+          STT: {sweepResult.stt.provider}/{sweepResult.stt.model},
+          align: {sweepResult.turn_align})
+        </h3>
         <button
-          className="btn"
-          onClick={handleRunSweep}
-          disabled={sweepRunning || !sweepDatasetId}
+          className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
+          onClick={onDownload}
         >
-          {sweepRunning ? "Running sweep..." : "Run strength sweep"}
+          Download JSON
         </button>
-        {sweepRunning && (
-          <span className="text-sm text-slate-500">
-            This may take several minutes depending on dataset size.
-          </span>
-        )}
       </div>
 
-      {sweepError && (
-        <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-          {sweepError}
-        </div>
-      )}
-
-      {pivotTable && sweepResult && (
-        <div className="mt-6">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-slate-700">
-              Results — {sweepResult.dataset_name} ({sweepResult.total_calls} calls,
-              STT: {sweepResult.stt.provider}/{sweepResult.stt.model})
-            </h3>
-            <button
-              className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
-              onClick={handleDownloadJSON}
-            >
-              Download JSON
-            </button>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead>
-                <tr className="border-b text-left text-slate-500">
-                  <th className="py-2 pr-4">Strength</th>
-                  {pivotTable.engines.map((eng) => (
-                    <th key={eng} className="py-2 px-3 text-center" colSpan={2}>
-                      {eng}
-                    </th>
-                  ))}
-                </tr>
-                <tr className="border-b text-left text-[11px] text-slate-400">
-                  <th className="py-1 pr-4"></th>
-                  {pivotTable.engines.map((eng) => (
-                    <Fragment key={eng}>
-                      <th className="py-1 px-3 text-center font-normal">WW-WER</th>
-                      <th className="py-1 px-3 text-center font-normal">Avg-WER</th>
-                    </Fragment>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {pivotTable.strengths.map((s) => (
-                  <tr key={s} className="border-b border-slate-100">
-                    <td className="py-2 pr-4 font-medium">{s}</td>
-                    {pivotTable.engines.map((eng) => {
-                      const r = pivotTable.lookup.get(`${eng}::${s}`);
-                      if (!r) {
-                        return (
-                          <Fragment key={eng}>
-                            <td className="py-2 px-3 text-center text-slate-400">—</td>
-                            <td className="py-2 px-3 text-center text-slate-400">—</td>
-                          </Fragment>
-                        );
-                      }
-                      return (
-                        <Fragment key={eng}>
-                          <td className="py-2 px-3 text-center">
-                            {r.word_weighted_wer_pct != null
-                              ? `${r.word_weighted_wer_pct}%`
-                              : "—"}
-                          </td>
-                          <td className="py-2 px-3 text-center">
-                            {r.turn_avg_wer_pct != null ? `${r.turn_avg_wer_pct}%` : "—"}
-                          </td>
-                        </Fragment>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="mt-4 overflow-x-auto">
-            <h4 className="mb-2 text-xs font-medium text-slate-500">Detailed breakdown</h4>
-            <table className="min-w-full text-xs">
-              <thead>
-                <tr className="border-b text-left text-slate-500">
-                  <th className="py-1 pr-3">Engine</th>
-                  <th className="py-1 pr-3">Strength</th>
-                  <th className="py-1 pr-3">WW-WER%</th>
-                  <th className="py-1 pr-3">Avg-WER%</th>
-                  <th className="py-1 pr-3">Calls</th>
-                  <th className="py-1 pr-3">Subs</th>
-                  <th className="py-1 pr-3">Dels</th>
-                  <th className="py-1 pr-3">Ins</th>
-                  <th className="py-1">Ref words</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sweepResult.results.map((r, i) => {
-                  const best =
-                    sweepResult.results
-                      .filter((x) => x.engine === r.engine && x.word_weighted_wer_pct != null)
-                      .sort(
-                        (a, b) => (a.word_weighted_wer_pct ?? 999) - (b.word_weighted_wer_pct ?? 999),
-                      )[0]?.strength === r.strength;
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead>
+            <tr className="border-b text-left text-slate-500">
+              <th className="py-2 pr-4">Strength</th>
+              {pivotTable.engines.map((eng) => (
+                <th key={eng} className="py-2 px-3 text-center" colSpan={2}>
+                  {eng}
+                </th>
+              ))}
+            </tr>
+            <tr className="border-b text-left text-[11px] text-slate-400">
+              <th className="py-1 pr-4"></th>
+              {pivotTable.engines.map((eng) => (
+                <Fragment key={eng}>
+                  <th className="py-1 px-3 text-center font-normal">WW-WER</th>
+                  <th className="py-1 px-3 text-center font-normal">Avg-WER</th>
+                </Fragment>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {pivotTable.strengths.map((s) => (
+              <tr key={s} className="border-b border-slate-100">
+                <td className="py-2 pr-4 font-medium">{s}</td>
+                {pivotTable.engines.map((eng) => {
+                  const r = pivotTable.lookup.get(`${eng}::${s}`);
+                  if (!r) {
+                    return (
+                      <Fragment key={eng}>
+                        <td className="py-2 px-3 text-center text-slate-400">—</td>
+                        <td className="py-2 px-3 text-center text-slate-400">—</td>
+                      </Fragment>
+                    );
+                  }
                   return (
-                    <tr
-                      key={i}
-                      className={`border-b border-slate-50 ${best ? "bg-emerald-50" : ""}`}
-                    >
-                      <td className="py-1 pr-3 font-medium">{r.engine}</td>
-                      <td className="py-1 pr-3">{r.strength}</td>
-                      <td className="py-1 pr-3">
-                        {r.word_weighted_wer_pct != null ? `${r.word_weighted_wer_pct}%` : "—"}
+                    <Fragment key={eng}>
+                      <td className="py-2 px-3 text-center">
+                        {r.word_weighted_wer_pct != null
+                          ? `${r.word_weighted_wer_pct}%`
+                          : "—"}
                       </td>
-                      <td className="py-1 pr-3">
+                      <td className="py-2 px-3 text-center">
                         {r.turn_avg_wer_pct != null ? `${r.turn_avg_wer_pct}%` : "—"}
                       </td>
-                      <td className="py-1 pr-3">{r.calls}</td>
-                      <td className="py-1 pr-3">{r.substitutions ?? "—"}</td>
-                      <td className="py-1 pr-3">{r.deletions ?? "—"}</td>
-                      <td className="py-1 pr-3">{r.insertions ?? "—"}</td>
-                      <td className="py-1">{r.ref_words ?? "—"}</td>
-                    </tr>
+                    </Fragment>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-    </section>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-4 overflow-x-auto">
+        <h4 className="mb-2 text-xs font-medium text-slate-500">Detailed breakdown</h4>
+        <table className="min-w-full text-xs">
+          <thead>
+            <tr className="border-b text-left text-slate-500">
+              <th className="py-1 pr-3">Engine</th>
+              <th className="py-1 pr-3">Strength</th>
+              <th className="py-1 pr-3">WW-WER%</th>
+              <th className="py-1 pr-3">Avg-WER%</th>
+              <th className="py-1 pr-3">Calls</th>
+              <th className="py-1 pr-3">Subs</th>
+              <th className="py-1 pr-3">Dels</th>
+              <th className="py-1 pr-3">Ins</th>
+              <th className="py-1">Ref words</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sweepResult.results.map((r, i) => {
+              const best =
+                sweepResult.results
+                  .filter((x) => x.engine === r.engine && x.word_weighted_wer_pct != null)
+                  .sort(
+                    (a, b) => (a.word_weighted_wer_pct ?? 999) - (b.word_weighted_wer_pct ?? 999),
+                  )[0]?.strength === r.strength;
+              return (
+                <tr
+                  key={i}
+                  className={`border-b border-slate-50 ${best ? "bg-emerald-50" : ""}`}
+                >
+                  <td className="py-1 pr-3 font-medium">{r.engine}</td>
+                  <td className="py-1 pr-3">{r.strength}</td>
+                  <td className="py-1 pr-3">
+                    {r.word_weighted_wer_pct != null ? `${r.word_weighted_wer_pct}%` : "—"}
+                  </td>
+                  <td className="py-1 pr-3">
+                    {r.turn_avg_wer_pct != null ? `${r.turn_avg_wer_pct}%` : "—"}
+                  </td>
+                  <td className="py-1 pr-3">{r.calls}</td>
+                  <td className="py-1 pr-3">{r.substitutions ?? "—"}</td>
+                  <td className="py-1 pr-3">{r.deletions ?? "—"}</td>
+                  <td className="py-1 pr-3">{r.insertions ?? "—"}</td>
+                  <td className="py-1">{r.ref_words ?? "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -683,6 +459,31 @@ export default function App() {
   const [tier, setTier] = useState("tier_a");
   const [turnAlign, setTurnAlign] = useState("forced");
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
+
+  const [enableSweep, setEnableSweep] = useState(false);
+  const [dtlnSelected, setDtlnSelected] = useState<Set<number>>(new Set());
+  const [dtlnAll, setDtlnAll] = useState(false);
+  const [hushSelected, setHushSelected] = useState<Set<number>>(new Set());
+  const [hushAll, setHushAll] = useState(false);
+  const [hecttorSelected, setHecttorSelected] = useState<Set<number>>(new Set());
+  const [hecttorAll, setHecttorAll] = useState(false);
+  const [sweepRunning, setSweepRunning] = useState(false);
+  const [sweepResult, setSweepResult] = useState<SweepResponse | null>(null);
+
+  const toggleStrength = (
+    set: Set<number>,
+    setter: (s: Set<number>) => void,
+    val: number,
+  ) => {
+    const next = new Set(set);
+    if (next.has(val)) next.delete(val);
+    else next.add(val);
+    setter(next);
+  };
+
+  const effectiveDtln = dtlnAll ? DTLN_HUSH_STRENGTHS : [...dtlnSelected].sort((a, b) => a - b);
+  const effectiveHush = hushAll ? DTLN_HUSH_STRENGTHS : [...hushSelected].sort((a, b) => a - b);
+  const effectiveHecttor = hecttorAll ? HECTTOR_STRENGTHS : [...hecttorSelected].sort((a, b) => a - b);
 
   const selectedRun = useMemo(
     () => runs.find((r) => r.id === selectedRunId) || null,
@@ -741,16 +542,40 @@ export default function App() {
     }
   };
 
+  const hasSweepSelection =
+    effectiveDtln.length > 0 || effectiveHush.length > 0 || effectiveHecttor.length > 0;
+
   const handleCreateRun = async () => {
     if (!datasetId) return;
+
+    if (enableSweep && hasSweepSelection) {
+      setSweepRunning(true);
+      setSweepResult(null);
+      setError(null);
+      try {
+        const alignValue = turnAlign === "full" ? "vad" : turnAlign;
+        const res = await api.strengthSweep({
+          dataset_id: Number(datasetId),
+          dtln_strengths: effectiveDtln,
+          hush_strengths: effectiveHush,
+          hecttor_strengths: effectiveHecttor,
+          turn_align: alignValue,
+        });
+        setSweepResult(res);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Strength sweep failed");
+      } finally {
+        setSweepRunning(false);
+      }
+      return;
+    }
+
     try {
       const run = await api.createRun({
         dataset_id: Number(datasetId),
         name: runName,
         tier,
         config: {
-          // In full mode turn_align is unused; send a valid placeholder since
-          // the worker only accepts timestamp/vad/forced for --turn-align.
           turn_align: turnAlign === "full" ? "vad" : turnAlign,
           segment_mode: turnAlign === "full" ? "full" : "turn",
           stt_provider: "deepgram",
@@ -763,6 +588,19 @@ export default function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Run creation failed");
     }
+  };
+
+  const handleDownloadSweepJSON = () => {
+    if (!sweepResult) return;
+    const blob = new Blob([JSON.stringify(sweepResult, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `strength_sweep_${sweepResult.dataset_name || sweepResult.dataset_id}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -906,14 +744,147 @@ export default function App() {
                 <option value="full">Full recording — transcribe whole call at once</option>
               </select>
             </label>
-            <button className="btn" onClick={handleCreateRun} disabled={!datasetId}>
-              Start run
+
+            <label className="flex items-center gap-2 pt-1">
+              <input
+                type="checkbox"
+                checked={enableSweep}
+                onChange={(e) => setEnableSweep(e.target.checked)}
+              />
+              <span className="text-sm font-medium text-slate-700">
+                Strength sweep
+              </span>
+              <span className="text-xs text-slate-500">
+                — compare WER at different NC strengths
+              </span>
+            </label>
+
+            {enableSweep && (
+              <div className="space-y-3 rounded-lg border border-slate-200 p-4">
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="text-sm font-medium">DTLN strengths</span>
+                      <label className="flex items-center gap-1.5 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={dtlnAll}
+                          onChange={(e) => setDtlnAll(e.target.checked)}
+                        />
+                        All
+                      </label>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {DTLN_HUSH_STRENGTHS.map((s) => (
+                        <button
+                          key={s}
+                          className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                            dtlnAll || dtlnSelected.has(s)
+                              ? "bg-slate-900 text-white"
+                              : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                          }`}
+                          onClick={() => {
+                            if (!dtlnAll) toggleStrength(dtlnSelected, setDtlnSelected, s);
+                          }}
+                          disabled={dtlnAll}
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="mt-3 mb-2 flex items-center justify-between">
+                      <span className="text-sm font-medium">Hush strengths</span>
+                      <label className="flex items-center gap-1.5 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={hushAll}
+                          onChange={(e) => setHushAll(e.target.checked)}
+                        />
+                        All
+                      </label>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {DTLN_HUSH_STRENGTHS.map((s) => (
+                        <button
+                          key={s}
+                          className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                            hushAll || hushSelected.has(s)
+                              ? "bg-slate-900 text-white"
+                              : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                          }`}
+                          onClick={() => {
+                            if (!hushAll) toggleStrength(hushSelected, setHushSelected, s);
+                          }}
+                          disabled={hushAll}
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="text-sm font-medium">Hecttor strengths</span>
+                      <label className="flex items-center gap-1.5 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={hecttorAll}
+                          onChange={(e) => setHecttorAll(e.target.checked)}
+                        />
+                        All
+                      </label>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {HECTTOR_STRENGTHS.map((s) => (
+                        <button
+                          key={s}
+                          className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                            hecttorAll || hecttorSelected.has(s)
+                              ? "bg-slate-900 text-white"
+                              : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                          }`}
+                          onClick={() => {
+                            if (!hecttorAll) toggleStrength(hecttorSelected, setHecttorSelected, s);
+                          }}
+                          disabled={hecttorAll}
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-[11px] text-slate-500">
+                      Runs all Hecttor models configured in the worker.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <button
+              className="btn"
+              onClick={handleCreateRun}
+              disabled={!datasetId || sweepRunning}
+            >
+              {sweepRunning
+                ? "Running strength sweep..."
+                : enableSweep && hasSweepSelection
+                  ? "Run strength sweep"
+                  : "Start run"}
             </button>
+            {sweepRunning && (
+              <p className="text-xs text-slate-500">
+                This may take several minutes depending on dataset size and number of strengths selected.
+              </p>
+            )}
           </div>
         </section>
       </div>
 
-      <StrengthSweepSection datasets={datasets} />
+      {sweepResult && (
+        <SweepResultsTable sweepResult={sweepResult} onDownload={handleDownloadSweepJSON} />
+      )}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
         <section className="card lg:col-span-1">
