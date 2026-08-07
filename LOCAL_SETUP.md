@@ -87,6 +87,8 @@ cd /path/to/livekit-agent-worker
 make setup    # or: poetry install
 
 # Hush assets (native lib + ONNX) — required for hush engine
+# Usually pulled automatically by NC_WER_Analysis `make setup` (see Step 3).
+# Manual fallback:
 make download-hush   # or: ./scripts/download_hush_assets.sh
 
 # Confirm Sanas Linux wheel exists (for Tier B)
@@ -154,7 +156,7 @@ At runtime the worker adds `{LIVEKIT_WORKER_ROOT}/src` to `PYTHONPATH` and impor
 ```bash
 cd /path/to/NC_WER_Analysis
 # Ensure LIVEKIT_WORKER_ROOT is in .env first
-make setup          # creates Python 3.13 venv + installs hecttor wheel
+make setup          # venv + hecttor wheel + Hush assets (lib + ONNX model)
 ```
 
 If the venv was created with Python 3.14 earlier, recreate it:
@@ -492,11 +494,8 @@ Sanas still uses the **dedicated** `scripts/docker_sanas_benchmark.sh` (profile 
 
 - [ ] Clone `NC_WER_Analysis` + `livekit-agent-worker`
 - [ ] `poetry install` (or `make setup`) in livekit-agent-worker
-- [ ] Hush assets downloaded
-- [ ] Sanas `.whl` present under `sdk/sanas/`
-- [ ] `ffmpeg` installed
-- [ ] `NC_WER_Analysis/.env` filled (`LIVEKIT_WORKER_ROOT`, STT, Hecttor, Sanas)
-- [ ] `make setup` in NC_WER_Analysis
+- [ ] `NC_WER_Analysis/.env` filled (`LIVEKIT_WORKER_ROOT`, STT, Hecttor keys)
+- [ ] `make setup` in NC_WER_Analysis (hecttor wheel + Hush assets)
 
 ### Every session
 

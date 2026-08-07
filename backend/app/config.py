@@ -22,13 +22,29 @@ class Settings(BaseSettings):
 
     deepgram_api_key: str = ""
     hecttor_api_key: str = ""
+    sarvam_api_key: str = ""
+    google_service_account_json: str = ""
+    google_cloud_project: str = ""
+    google_stt_location: str = "us"
 
     default_stt_provider: str = "deepgram"
     default_stt_model: str = "nova-2"
     default_stt_language: str = "hi"
     default_turn_align: str = "forced"
+    # Stacked scoring: forced align + ITN + OI-WER lattice (cross-script fuzzy
+    # matching is applied inside both explain_wer and explain_oiwer).
+    default_scoring: str = "itn+oiwer"
     default_nc_strength: float = 0.5
     default_hush_strength: float = 0.35
+
+    # Execution mode: "server" = multiprocessing (ProcessPool) + asyncio fan-out;
+    # "local" = single-process sequential across calls (asyncio STT overlap only).
+    default_execution_mode: str = "server"
+
+    # Parallelism: process workers ≈ vCPUs/2 on n2-standard-16 → 8
+    worker_processes: int = 8
+    worker_cpu_threads: int = 2
+    stt_async_concurrency: int = 4
 
     @property
     def cors_origins(self) -> list[str]:

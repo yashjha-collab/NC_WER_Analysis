@@ -22,6 +22,13 @@ from app.services import dataset_service, run_service
 router = APIRouter(prefix="/api/v1", tags=["api"])
 
 
+@router.get("/stt-presets")
+async def list_stt_presets() -> list[dict]:
+    from worker.stt_presets import STT_PRESETS
+
+    return STT_PRESETS
+
+
 @router.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -289,6 +296,13 @@ async def strength_sweep(
             hecttor_models=payload.hecttor_models,
             max_calls=payload.max_calls,
             turn_align=payload.turn_align,
+            workers=payload.workers,
+            stt_provider=payload.stt_provider,
+            stt_model=payload.stt_model,
+            stt_language=payload.stt_language,
+            stt_preset_ids=payload.stt_preset_ids or None,
+            scoring=payload.scoring,
+            execution_mode=payload.execution_mode,
         )
         return result
     except ValueError as exc:

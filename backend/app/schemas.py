@@ -60,3 +60,10 @@ class StrengthSweepRequest(BaseModel):
     hecttor_models: list[str] = Field(default_factory=lambda: ["coda-1.0"])
     max_calls: int | None = None
     turn_align: str = "forced"
+    scoring: str = "itn+oiwer"
+    execution_mode: str | None = None
+    workers: int | None = None
+    stt_provider: str | None = None
+    stt_model: str | None = None
+    stt_language: str | None = None
+    stt_preset_ids: list[str] = Field(default_factory=list)

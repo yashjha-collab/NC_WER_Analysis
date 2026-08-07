@@ -83,6 +83,9 @@ export type Diagnostics = {
 export type SweepResult = {
   engine: string;
   strength: number;
+  stt_provider?: string;
+  stt_model?: string;
+  stt_id?: string;
   calls: number;
   word_weighted_wer_pct: number | null;
   turn_avg_wer_pct: number | null;
@@ -93,12 +96,26 @@ export type SweepResult = {
   error?: string;
 };
 
+export type SttConfig = {
+  stt_id: string;
+  stt_provider: string;
+  stt_model: string;
+  stt_language: string;
+};
+
 export type SweepResponse = {
   dataset_id: number;
   dataset_name: string;
   total_calls: number;
   turn_align: string;
-  stt: { provider: string; model: string; language: string };
+  scoring?: string;
+  execution_mode?: string;
+  workers?: number;
+  cpu_threads_per_worker?: number;
+  jobs_total?: number;
+  jobs_failed?: number;
+  jobs_cached?: number;
+  stt_configs?: SttConfig[];
   results: SweepResult[];
 };
 
@@ -143,6 +160,13 @@ export const api = {
     hecttor_models?: string[];
     max_calls?: number;
     turn_align?: string;
+    scoring?: string;
+    execution_mode?: "server" | "local";
+    workers?: number;
+    stt_provider?: string;
+    stt_model?: string;
+    stt_language?: string;
+    stt_preset_ids?: string[];
   }) =>
     request<SweepResponse>("/strength-sweep", {
       method: "POST",

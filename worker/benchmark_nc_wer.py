@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import io
 import json
@@ -11,6 +12,7 @@ import os
 import sys
 from pathlib import Path
 
+import httpx
 import numpy as np
 from dotenv import load_dotenv
 
@@ -39,7 +41,7 @@ from worker.nc_engines import (  # noqa: E402
     native_sample_rate,
     skipped_engines,
 )
-from worker.stt import transcribe_pcm  # noqa: E402
+from worker.stt import transcribe_pcm, transcribe_pcm_async  # noqa: E402
 from worker.wer import (  # noqa: E402
     explain_oiwer,
     explain_wer,
@@ -60,6 +62,72 @@ def resolve_nc_strength(engine: str, args: argparse.Namespace) -> float:
     return float(args.nc_strength)
 
 
+async def _transcribe_many_async(
+    items: list[tuple[int, np.ndarray]],
+    *,
+    provider: str,
+    model: str,
+    language: str,
+    max_concurrent: int = 4,
+) -> dict[int, str]:
+    """Overlap STT network waits with asyncio (within one worker process)."""
+    if not items:
+        return {}
+    sem = asyncio.Semaphore(max(1, max_concurrent))
+    out: dict[int, str] = {}
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+
+        async def _one(idx: int, pcm: np.ndarray) -> None:
+            async with sem:
+                out[idx] = await transcribe_pcm_async(
+                    pcm,
+                    STT_SAMPLE_RATE,
+                    provider=provider,
+                    model=model,
+                    language=language,
+                    client=client,
+                )
+
+        await asyncio.gather(*[_one(i, pcm) for i, pcm in items])
+    return out
+
+
+def _transcribe_many(
+    items: list[tuple[int, np.ndarray]],
+    *,
+    provider: str,
+    model: str,
+    language: str,
+    max_concurrent: int = 4,
+) -> dict[int, str]:
+    if not items:
+        return {}
+    # Async STT batching; fall back to sync if event loop already running.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            _transcribe_many_async(
+                items,
+                provider=provider,
+                model=model,
+                language=language,
+                max_concurrent=max_concurrent,
+            )
+        )
+    return {
+        i: transcribe_pcm(
+            pcm,
+            STT_SAMPLE_RATE,
+            provider=provider,
+            model=model,
+            language=language,
+        )
+        for i, pcm in items
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark NC engines with WER")
     parser.add_argument("--recording", required=True, help="Path to human/user audio")
@@ -77,7 +145,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--turn-align",
         choices=("timestamp", "vad", "forced"),
-        default="vad",
+        default="forced",
     )
     parser.add_argument("--require-user-track", action="store_true")
     parser.add_argument("--no-vad-tighten", action="store_true",
@@ -90,9 +158,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stt-provider", default="deepgram")
     parser.add_argument("--stt-model", default="nova-2")
     parser.add_argument("--stt-language", default="hi")
-    parser.add_argument("--scoring", default="wer",
+    parser.add_argument("--scoring", default="itn+oiwer",
                         choices=["wer", "itn", "oiwer", "itn+oiwer"],
-                        help="Scoring mode: wer=plain, itn=ITN-normalized, oiwer=lattice-based, itn+oiwer=both")
+                        help="Scoring mode: wer=plain, itn=ITN-normalized, oiwer=lattice-based, "
+                             "itn+oiwer=both (default; cross-script fuzzy matching applies in all modes)")
     parser.add_argument("--noun-files", nargs="*", default=[],
                         help="JSON files with noun/variation maps (e.g. golden set misinterpretations)")
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -195,6 +264,10 @@ def score_engine(
         if normalize_text(reference) == normalize_text(hypothesis):
             exact_matches = 1
     else:
+        pending_stt: list[tuple[int, np.ndarray]] = []
+        # Each entry is either a finished excluded row, or ("pending", key, meta)
+        staged: list[dict | tuple] = []
+
         for turn in turns:
             if turn.start_s is None or turn.end_s is None:
                 continue
@@ -216,7 +289,7 @@ def score_engine(
                     f"→ excluded from WER average"
                 ] + detail["reasons"]
                 detail["primary_reason"] = detail["reasons"][0]
-                turn_rows.append(
+                staged.append(
                     {
                         "turn": turn.turn,
                         "reference": turn.reference,
@@ -240,7 +313,7 @@ def score_engine(
                     "→ no unique audio window; excluded from WER average"
                 ] + detail["reasons"]
                 detail["primary_reason"] = detail["reasons"][0]
-                turn_rows.append(
+                staged.append(
                     {
                         "turn": turn.turn,
                         "reference": turn.reference,
@@ -257,15 +330,28 @@ def score_engine(
                 excluded_turns += 1
                 continue
 
+            # NC is CPU/stateful — keep sequential; STT is overlapped via asyncio.
             processed, nc_sr = apply_nc(segment, sample_rate, engine, processor)
             stt_pcm = resample_pcm(processed, nc_sr, STT_SAMPLE_RATE)
-            hypothesis = transcribe_pcm(
-                stt_pcm,
-                STT_SAMPLE_RATE,
-                provider=args.stt_provider,
-                model=args.stt_model,
-                language=args.stt_language,
-            )
+            key = len(pending_stt)
+            pending_stt.append((key, stt_pcm))
+            staged.append(("pending", key, turn, seg_dur_s))
+
+        hypotheses = _transcribe_many(
+            pending_stt,
+            provider=args.stt_provider,
+            model=args.stt_model,
+            language=args.stt_language,
+            max_concurrent=int(os.getenv("STT_ASYNC_CONCURRENCY", "4")),
+        )
+
+        for item in staged:
+            if isinstance(item, dict):
+                turn_rows.append(item)
+                continue
+
+            _, key, turn, seg_dur_s = item
+            hypothesis = hypotheses.get(key, "")
 
             short_empty_thresh = getattr(args, "short_empty_s", 0.8)
             if not hypothesis.strip() and seg_dur_s < short_empty_thresh:

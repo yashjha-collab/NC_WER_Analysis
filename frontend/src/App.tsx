@@ -297,7 +297,219 @@ function CallEngineTable({ report }: { report: Record<string, unknown> }) {
 }
 
 const DTLN_HUSH_STRENGTHS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-const HECTTOR_STRENGTHS = [0.25, 0.5, 0.75, 1.0];
+const HECTTOR_STRENGTHS = [0.25, 0.5, 0.75, 0.8, 0.9, 1.0];
+const STT_PRESETS = [
+  { id: "deepgram-nova-2", label: "Deepgram Nova-2" },
+  { id: "deepgram-nova-3", label: "Deepgram Nova-3" },
+  { id: "google-chirp-3", label: "Google Chirp 3" },
+  { id: "sarvam-saaras-v3", label: "Sarvam Saaras v3" },
+] as const;
+
+/** Tier A: none + dtln + hush + 5 hecttor sub-models */
+const TIER_A_NC_MODEL_COUNT = 8;
+const HECTTOR_SUBMODEL_COUNT = 5;
+
+type NcConfigBreakdown = {
+  none: number;
+  dtln: number;
+  hush: number;
+  hecttor: number;
+  /** Configs scored by this run */
+  inRun: number;
+  /** Full comparison grid incl. none baseline */
+  full: number;
+};
+
+type RunJobEstimate = {
+  calls: number;
+  sttCount: number;
+  mode: "sweep" | "tier";
+  subprocessJobs: number;
+  /** NC evaluations this run produces */
+  ncEvaluations: number;
+  /** calls × STTs × full config grid (51 when all strengths selected) */
+  ncEvaluationsFullGrid: number;
+  strengthTrials: number;
+  configBreakdown: NcConfigBreakdown;
+};
+
+function estimateRunJobs(input: {
+  callCount: number;
+  sttCount: number;
+  dtlnStrengths: number;
+  hushStrengths: number;
+  hecttorStrengths: number;
+  isSweep: boolean;
+}): RunJobEstimate | null {
+  const { callCount, sttCount, dtlnStrengths, hushStrengths, hecttorStrengths, isSweep } =
+    input;
+  if (!callCount || !sttCount) return null;
+
+  const noneConfigs = 1;
+  const hecttorConfigs = hecttorStrengths * HECTTOR_SUBMODEL_COUNT;
+  const fullConfigs = noneConfigs + dtlnStrengths + hushStrengths + hecttorConfigs;
+
+  if (isSweep) {
+    const strengthTrials = dtlnStrengths + hushStrengths + hecttorStrengths;
+    if (strengthTrials === 0) return null;
+    const inRunConfigs = dtlnStrengths + hushStrengths + hecttorConfigs;
+    return {
+      calls: callCount,
+      sttCount,
+      mode: "sweep",
+      strengthTrials,
+      subprocessJobs: callCount * sttCount * strengthTrials,
+      ncEvaluations: callCount * sttCount * inRunConfigs,
+      ncEvaluationsFullGrid: callCount * sttCount * fullConfigs,
+      configBreakdown: {
+        none: noneConfigs,
+        dtln: dtlnStrengths,
+        hush: hushStrengths,
+        hecttor: hecttorConfigs,
+        inRun: inRunConfigs,
+        full: fullConfigs,
+      },
+    };
+  }
+
+  return {
+    calls: callCount,
+    sttCount,
+    mode: "tier",
+    strengthTrials: 0,
+    subprocessJobs: callCount * sttCount,
+    ncEvaluations: callCount * sttCount * TIER_A_NC_MODEL_COUNT,
+    ncEvaluationsFullGrid: callCount * sttCount * TIER_A_NC_MODEL_COUNT,
+    configBreakdown: {
+      none: noneConfigs,
+      dtln: 1,
+      hush: 1,
+      hecttor: HECTTOR_SUBMODEL_COUNT,
+      inRun: TIER_A_NC_MODEL_COUNT,
+      full: TIER_A_NC_MODEL_COUNT,
+    },
+  };
+}
+
+function JobEstimatePanel({ estimate }: { estimate: RunJobEstimate | null }) {
+  if (!estimate) {
+    return (
+      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+        Select a dataset and at least one STT to see job estimates.
+      </div>
+    );
+  }
+
+  const fmt = (n: number) => n.toLocaleString();
+  const { configBreakdown: b } = estimate;
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-700">
+      <div className="mb-2 font-medium text-slate-900">Estimated workload</div>
+
+      <div className="mb-3 overflow-x-auto">
+        <table className="min-w-full text-[11px]">
+          <thead>
+            <tr className="border-b text-left text-slate-500">
+              <th className="py-1 pr-3 font-medium">NC component</th>
+              <th className="py-1 pr-3 font-medium">Configs / call / STT</th>
+              <th className="py-1 font-medium">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-slate-100">
+              <td className="py-1.5 pr-3">none (baseline)</td>
+              <td className="py-1.5 pr-3 font-medium">{b.none}</td>
+              <td className="py-1.5 text-slate-500">
+                {estimate.mode === "sweep"
+                  ? "Tier A run only — not in strength sweep"
+                  : "included in Tier A run"}
+              </td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-1.5 pr-3">dtln</td>
+              <td className="py-1.5 pr-3 font-medium">{b.dtln}</td>
+              <td className="py-1.5 text-slate-500">
+                {estimate.mode === "sweep" ? `${b.dtln} strength settings` : "default strength"}
+              </td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-1.5 pr-3">hush</td>
+              <td className="py-1.5 pr-3 font-medium">{b.hush}</td>
+              <td className="py-1.5 text-slate-500">
+                {estimate.mode === "sweep" ? `${b.hush} strength settings` : "default strength"}
+              </td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-1.5 pr-3">hecttor (5 sub-models)</td>
+              <td className="py-1.5 pr-3 font-medium">{b.hecttor}</td>
+              <td className="py-1.5 text-slate-500">
+                {estimate.mode === "sweep"
+                  ? `${estimate.configBreakdown.hecttor / HECTTOR_SUBMODEL_COUNT || 0} strengths × ${HECTTOR_SUBMODEL_COUNT} models`
+                  : `${HECTTOR_SUBMODEL_COUNT} sub-models`}
+              </td>
+            </tr>
+            <tr className="font-medium text-slate-900">
+              <td className="py-1.5 pr-3">Total configs / call / STT</td>
+              <td className="py-1.5 pr-3">
+                {b.inRun}
+                {estimate.mode === "sweep" && b.full !== b.inRun ? (
+                  <span className="font-normal text-slate-500"> ({b.full} with none)</span>
+                ) : null}
+              </td>
+              <td className="py-1.5 font-normal text-slate-500">
+                {estimate.mode === "sweep"
+                  ? "Compare best NC + strength + STT"
+                  : "8 models at default strength"}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <dl className="grid gap-1.5 sm:grid-cols-2">
+        <div>
+          <dt className="text-slate-500">Calls × STTs</dt>
+          <dd className="font-medium">
+            {fmt(estimate.calls)} × {estimate.sttCount} ={" "}
+            {fmt(estimate.calls * estimate.sttCount)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-slate-500">Subprocess jobs (this run)</dt>
+          <dd className="font-medium">{fmt(estimate.subprocessJobs)}</dd>
+        </div>
+        <div>
+          <dt className="text-slate-500">NC evaluations (this run)</dt>
+          <dd className="font-medium">{fmt(estimate.ncEvaluations)}</dd>
+        </div>
+        {estimate.mode === "sweep" && estimate.ncEvaluationsFullGrid !== estimate.ncEvaluations ? (
+          <div>
+            <dt className="text-slate-500">Full grid incl. none baseline</dt>
+            <dd className="font-medium">{fmt(estimate.ncEvaluationsFullGrid)}</dd>
+          </div>
+        ) : null}
+      </dl>
+
+      <p className="mt-2 text-[11px] text-slate-500">
+        {estimate.mode === "sweep" ? (
+          <>
+            Strength sweep: {estimate.strengthTrials} subprocess jobs per call/STT ({b.dtln}{" "}
+            DTLN + {b.hush} Hush + {b.hecttor / HECTTOR_SUBMODEL_COUNT} Hecttor trials; each
+            Hecttor trial scores all {HECTTOR_SUBMODEL_COUNT} sub-models). Add a Tier A run for
+            the none baseline ({fmt(estimate.calls * estimate.sttCount * b.none)} extra
+            evaluations) to reach {fmt(estimate.ncEvaluationsFullGrid)} total.
+          </>
+        ) : (
+          <>
+            Tier A: one job per call/STT scoring all {TIER_A_NC_MODEL_COUNT} NC models (none, dtln,
+            hush, {HECTTOR_SUBMODEL_COUNT}× hecttor) at default strength.
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
 
 function SweepResultsTable({
   sweepResult,
@@ -306,26 +518,44 @@ function SweepResultsTable({
   sweepResult: SweepResponse;
   onDownload: () => void;
 }) {
-  const pivotTable = useMemo(() => {
-    if (!sweepResult?.results?.length) return null;
-    const engines = [...new Set(sweepResult.results.map((r) => r.engine))];
-    const strengths = [...new Set(sweepResult.results.map((r) => r.strength))].sort(
-      (a, b) => a - b,
-    );
-    const lookup = new Map<string, SweepResult>();
-    for (const r of sweepResult.results) lookup.set(`${r.engine}::${r.strength}`, r);
-    return { engines, strengths, lookup };
+  const sttGroups = useMemo(() => {
+    if (!sweepResult?.results?.length) return [];
+    const configs = sweepResult.stt_configs?.length
+      ? sweepResult.stt_configs
+      : [{ stt_id: "default", stt_provider: "deepgram", stt_model: "nova-2", stt_language: "hi" }];
+    return configs.map((cfg) => {
+      const rows = sweepResult.results.filter(
+        (r) =>
+          (r.stt_id && r.stt_id === cfg.stt_id) ||
+          (r.stt_provider === cfg.stt_provider && r.stt_model === cfg.stt_model),
+      );
+      const engines = [...new Set(rows.map((r) => r.engine))];
+      const strengths = [...new Set(rows.map((r) => r.strength))].sort((a, b) => a - b);
+      const lookup = new Map<string, SweepResult>();
+      for (const r of rows) lookup.set(`${r.engine}::${r.strength}`, r);
+      return {
+        cfg,
+        rows,
+        pivot: rows.length ? { engines, strengths, lookup } : null,
+      };
+    });
   }, [sweepResult]);
 
-  if (!pivotTable) return null;
+  if (!sttGroups.length || !sttGroups.some((g) => g.pivot)) return null;
 
   return (
-    <div className="mt-6">
+    <div className="mt-6 space-y-8">
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-medium text-slate-700">
           Strength sweep — {sweepResult.dataset_name} ({sweepResult.total_calls} calls,
-          STT: {sweepResult.stt.provider}/{sweepResult.stt.model},
-          align: {sweepResult.turn_align})
+          align: {sweepResult.turn_align}
+          {sweepResult.scoring ? `, scoring: ${sweepResult.scoring}` : ""}
+          {sweepResult.execution_mode ? `, mode: ${sweepResult.execution_mode}` : ""}
+          {sweepResult.workers ? `, workers: ${sweepResult.workers}` : ""}
+          {typeof sweepResult.jobs_cached === "number"
+            ? `, cached: ${sweepResult.jobs_cached}`
+            : ""}
+          )
         </h3>
         <button
           className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
@@ -335,65 +565,75 @@ function SweepResultsTable({
         </button>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="border-b text-left text-slate-500">
-              <th className="py-2 pr-4">Strength</th>
-              {pivotTable.engines.map((eng) => (
-                <th key={eng} className="py-2 px-3 text-center" colSpan={2}>
-                  {eng}
-                </th>
-              ))}
-            </tr>
-            <tr className="border-b text-left text-[11px] text-slate-400">
-              <th className="py-1 pr-4"></th>
-              {pivotTable.engines.map((eng) => (
-                <Fragment key={eng}>
-                  <th className="py-1 px-3 text-center font-normal">WW-WER</th>
-                  <th className="py-1 px-3 text-center font-normal">Avg-WER</th>
-                </Fragment>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {pivotTable.strengths.map((s) => (
-              <tr key={s} className="border-b border-slate-100">
-                <td className="py-2 pr-4 font-medium">{s}</td>
-                {pivotTable.engines.map((eng) => {
-                  const r = pivotTable.lookup.get(`${eng}::${s}`);
-                  if (!r) {
-                    return (
+      {sttGroups.map(({ cfg, pivot }) =>
+        !pivot ? null : (
+          <div key={cfg.stt_id}>
+            <h4 className="mb-2 text-sm font-medium text-slate-800">
+              STT: {cfg.stt_provider}/{cfg.stt_model}
+            </h4>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b text-left text-slate-500">
+                    <th className="py-2 pr-4">Strength</th>
+                    {pivot.engines.map((eng) => (
+                      <th key={eng} className="py-2 px-3 text-center" colSpan={2}>
+                        {eng}
+                      </th>
+                    ))}
+                  </tr>
+                  <tr className="border-b text-left text-[11px] text-slate-400">
+                    <th className="py-1 pr-4"></th>
+                    {pivot.engines.map((eng) => (
                       <Fragment key={eng}>
-                        <td className="py-2 px-3 text-center text-slate-400">—</td>
-                        <td className="py-2 px-3 text-center text-slate-400">—</td>
+                        <th className="py-1 px-3 text-center font-normal">WW-WER</th>
+                        <th className="py-1 px-3 text-center font-normal">Avg-WER</th>
                       </Fragment>
-                    );
-                  }
-                  return (
-                    <Fragment key={eng}>
-                      <td className="py-2 px-3 text-center">
-                        {r.word_weighted_wer_pct != null
-                          ? `${r.word_weighted_wer_pct}%`
-                          : "—"}
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        {r.turn_avg_wer_pct != null ? `${r.turn_avg_wer_pct}%` : "—"}
-                      </td>
-                    </Fragment>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {pivot.strengths.map((s) => (
+                    <tr key={s} className="border-b border-slate-100">
+                      <td className="py-2 pr-4 font-medium">{s}</td>
+                      {pivot.engines.map((eng) => {
+                        const r = pivot.lookup.get(`${eng}::${s}`);
+                        if (!r) {
+                          return (
+                            <Fragment key={eng}>
+                              <td className="py-2 px-3 text-center text-slate-400">—</td>
+                              <td className="py-2 px-3 text-center text-slate-400">—</td>
+                            </Fragment>
+                          );
+                        }
+                        return (
+                          <Fragment key={eng}>
+                            <td className="py-2 px-3 text-center">
+                              {r.word_weighted_wer_pct != null
+                                ? `${r.word_weighted_wer_pct}%`
+                                : "—"}
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              {r.turn_avg_wer_pct != null ? `${r.turn_avg_wer_pct}%` : "—"}
+                            </td>
+                          </Fragment>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ),
+      )}
 
       <div className="mt-4 overflow-x-auto">
         <h4 className="mb-2 text-xs font-medium text-slate-500">Detailed breakdown</h4>
         <table className="min-w-full text-xs">
           <thead>
             <tr className="border-b text-left text-slate-500">
+              <th className="py-1 pr-3">STT</th>
               <th className="py-1 pr-3">Engine</th>
               <th className="py-1 pr-3">Strength</th>
               <th className="py-1 pr-3">WW-WER%</th>
@@ -407,9 +647,18 @@ function SweepResultsTable({
           </thead>
           <tbody>
             {sweepResult.results.map((r, i) => {
+              const sttLabel = r.stt_provider
+                ? `${r.stt_provider}/${r.stt_model ?? ""}`
+                : "—";
               const best =
                 sweepResult.results
-                  .filter((x) => x.engine === r.engine && x.word_weighted_wer_pct != null)
+                  .filter(
+                    (x) =>
+                      x.engine === r.engine &&
+                      x.stt_provider === r.stt_provider &&
+                      x.stt_model === r.stt_model &&
+                      x.word_weighted_wer_pct != null,
+                  )
                   .sort(
                     (a, b) => (a.word_weighted_wer_pct ?? 999) - (b.word_weighted_wer_pct ?? 999),
                   )[0]?.strength === r.strength;
@@ -418,6 +667,7 @@ function SweepResultsTable({
                   key={i}
                   className={`border-b border-slate-50 ${best ? "bg-emerald-50" : ""}`}
                 >
+                  <td className="py-1 pr-3">{sttLabel}</td>
                   <td className="py-1 pr-3 font-medium">{r.engine}</td>
                   <td className="py-1 pr-3">{r.strength}</td>
                   <td className="py-1 pr-3">
@@ -458,6 +708,7 @@ export default function App() {
   const [datasetId, setDatasetId] = useState<number | "">("");
   const [tier, setTier] = useState("tier_a");
   const [turnAlign, setTurnAlign] = useState("forced");
+  const [executionMode, setExecutionMode] = useState<"server" | "local">("server");
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
 
   const [enableSweep, setEnableSweep] = useState(false);
@@ -469,6 +720,11 @@ export default function App() {
   const [hecttorAll, setHecttorAll] = useState(false);
   const [sweepRunning, setSweepRunning] = useState(false);
   const [sweepResult, setSweepResult] = useState<SweepResponse | null>(null);
+  const [workers, setWorkers] = useState(8);
+  const [sttSelected, setSttSelected] = useState<Set<string>>(
+    () => new Set(STT_PRESETS.map((p) => p.id)),
+  );
+  const [sttAll, setSttAll] = useState(true);
 
   const toggleStrength = (
     set: Set<number>,
@@ -484,6 +740,14 @@ export default function App() {
   const effectiveDtln = dtlnAll ? DTLN_HUSH_STRENGTHS : [...dtlnSelected].sort((a, b) => a - b);
   const effectiveHush = hushAll ? DTLN_HUSH_STRENGTHS : [...hushSelected].sort((a, b) => a - b);
   const effectiveHecttor = hecttorAll ? HECTTOR_STRENGTHS : [...hecttorSelected].sort((a, b) => a - b);
+  const effectiveSttPresets = sttAll
+    ? STT_PRESETS.map((p) => p.id)
+    : [...sttSelected];
+
+  const selectedDataset = useMemo(
+    () => datasets.find((d) => d.id === datasetId) ?? null,
+    [datasets, datasetId],
+  );
 
   const selectedRun = useMemo(
     () => runs.find((r) => r.id === selectedRunId) || null,
@@ -544,9 +808,35 @@ export default function App() {
 
   const hasSweepSelection =
     effectiveDtln.length > 0 || effectiveHush.length > 0 || effectiveHecttor.length > 0;
+  const hasSttSelection = effectiveSttPresets.length > 0;
+
+  const runJobEstimate = useMemo(
+    () =>
+      estimateRunJobs({
+        callCount: selectedDataset?.call_count ?? 0,
+        sttCount: effectiveSttPresets.length,
+        dtlnStrengths: effectiveDtln.length,
+        hushStrengths: effectiveHush.length,
+        hecttorStrengths: effectiveHecttor.length,
+        isSweep: enableSweep && hasSweepSelection,
+      }),
+    [
+      selectedDataset?.call_count,
+      effectiveSttPresets.length,
+      effectiveDtln.length,
+      effectiveHush.length,
+      effectiveHecttor.length,
+      enableSweep,
+      hasSweepSelection,
+    ],
+  );
 
   const handleCreateRun = async () => {
     if (!datasetId) return;
+    if (!hasSttSelection) {
+      setError("Select at least one STT model");
+      return;
+    }
 
     if (enableSweep && hasSweepSelection) {
       setSweepRunning(true);
@@ -560,6 +850,10 @@ export default function App() {
           hush_strengths: effectiveHush,
           hecttor_strengths: effectiveHecttor,
           turn_align: alignValue,
+          scoring: "itn+oiwer",
+          execution_mode: executionMode,
+          workers,
+          stt_preset_ids: effectiveSttPresets,
         });
         setSweepResult(res);
       } catch (err) {
@@ -578,9 +872,10 @@ export default function App() {
         config: {
           turn_align: turnAlign === "full" ? "vad" : turnAlign,
           segment_mode: turnAlign === "full" ? "full" : "turn",
-          stt_provider: "deepgram",
-          stt_model: "nova-2",
-          stt_language: "hi",
+          scoring: "itn+oiwer",
+          execution_mode: executionMode,
+          stt_preset_ids: effectiveSttPresets,
+          workers,
         },
       });
       setRuns((prev) => [run, ...prev]);
@@ -725,7 +1020,7 @@ export default function App() {
             </select>
             <select className="input" value={tier} onChange={(e) => setTier(e.target.value)}>
               <option value="tier_a">
-                Tier A — none, dtln, hush, hecttor (all 5 models)
+                Tier A — 8 NC models (none, dtln, hush, 5× hecttor)
               </option>
               <option value="tier_b">Tier B — sanas (both models, Linux Docker)</option>
             </select>
@@ -743,6 +1038,88 @@ export default function App() {
                 <option value="timestamp">Timestamp — raw createdAt windows</option>
                 <option value="full">Full recording — transcribe whole call at once</option>
               </select>
+            </label>
+
+            <label className="block text-sm font-medium text-slate-700">
+              Execution mode
+              <select
+                className="input mt-1"
+                value={executionMode}
+                onChange={(e) => setExecutionMode(e.target.value as "server" | "local")}
+              >
+                <option value="server">
+                  Server — multiprocessing (ProcessPool) + asyncio fan-out
+                </option>
+                <option value="local">
+                  Local — single process, sequential across calls (asyncio STT only)
+                </option>
+              </select>
+              <span className="mt-1 block text-xs text-slate-500">
+                Both modes apply forced alignment + ITN + OI-WER + cross-script matching.
+              </span>
+            </label>
+
+            <div className="rounded-lg border border-slate-200 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-sm font-medium text-slate-700">STT models</span>
+                <label className="flex items-center gap-1.5 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={sttAll}
+                    onChange={(e) => setSttAll(e.target.checked)}
+                  />
+                  All
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {STT_PRESETS.map((preset) => (
+                  <label
+                    key={preset.id}
+                    className={`flex cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-xs ${
+                      sttAll || sttSelected.has(preset.id)
+                        ? "bg-slate-900 text-white"
+                        : "bg-slate-100 text-slate-700"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      checked={sttAll || sttSelected.has(preset.id)}
+                      disabled={sttAll}
+                      onChange={() => {
+                        const next = new Set(sttSelected);
+                        if (next.has(preset.id)) next.delete(preset.id);
+                        else next.add(preset.id);
+                        setSttSelected(next);
+                      }}
+                    />
+                    {preset.label}
+                  </label>
+                ))}
+              </div>
+              <p className="mt-2 text-[11px] text-slate-500">
+                Runs iterate each selected STT across all NC engines/strengths.
+              </p>
+            </div>
+
+            <label className="block">
+              <span className="mb-1 block text-sm text-slate-600">
+                Parallel workers (multiprocessing)
+              </span>
+              <input
+                className="input w-28"
+                type="number"
+                min={1}
+                max={16}
+                value={executionMode === "local" ? 1 : workers}
+                disabled={executionMode === "local"}
+                onChange={(e) => setWorkers(Math.max(1, Number(e.target.value) || 1))}
+              />
+              <span className="ml-2 text-xs text-slate-500">
+                {executionMode === "local"
+                  ? "forced to 1 in local mode"
+                  : "default 8 on n2-standard-16 (~2 CPUs each)"}
+              </span>
             </label>
 
             <label className="flex items-center gap-2 pt-1">
@@ -861,6 +1238,8 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            <JobEstimatePanel estimate={runJobEstimate} />
 
             <button
               className="btn"
