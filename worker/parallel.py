@@ -93,6 +93,7 @@ async def amap_parallel(
     *,
     max_workers: int = 8,
     cpu_threads: int = 2,
+    on_complete: Callable[[int, int, T, Any], None] | None = None,
 ) -> list[Any]:
     """Async wrapper: schedule process-pool work without blocking the event loop."""
     import asyncio
@@ -105,15 +106,40 @@ async def amap_parallel(
     loop = asyncio.get_running_loop()
 
     if workers == 1:
-        return [await asyncio.to_thread(fn, item) for item in item_list]
+        results: list[Any] = []
+        total = len(item_list)
+        for idx, item in enumerate(item_list):
+            try:
+                result = await asyncio.to_thread(fn, item)
+            except Exception as exc:
+                result = exc
+            results.append(result)
+            if on_complete:
+                on_complete(idx + 1, total, item, result)
+        return results
 
+    results: list[Any | None] = [None] * len(item_list)
+    done_count = 0
     with ProcessPoolExecutor(
         max_workers=workers,
         mp_context=_mp_context(),
         initializer=_init_worker,
         initargs=(cpu_threads,),
     ) as pool:
-        futures = [
-            loop.run_in_executor(pool, fn, item) for item in item_list
-        ]
-        return await asyncio.gather(*futures, return_exceptions=True)
+        pending: dict[Any, tuple[int, T]] = {}
+        for idx, item in enumerate(item_list):
+            fut = loop.run_in_executor(pool, fn, item)
+            pending[fut] = (idx, item)
+
+        for fut in asyncio.as_completed(pending.keys()):
+            idx, item = pending[fut]
+            try:
+                result = await fut
+            except Exception as exc:
+                result = exc
+            results[idx] = result
+            done_count += 1
+            if on_complete:
+                on_complete(done_count, len(item_list), item, result)
+
+    return results  # type: ignore[return-value]

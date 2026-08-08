@@ -16,8 +16,37 @@ from app.schemas import (
     DatasetSummary,
     RunSummary,
     StrengthSweepRequest,
+    StrengthSweepStartResponse,
+    TaskProgressSummary,
 )
 from app.services import dataset_service, run_service
+
+
+def _run_summary(run: BenchmarkRun) -> RunSummary:
+    cfg = run.config_json or {}
+    detail = cfg.get("progress_detail")
+    from app.progress import progress_store
+
+    live = progress_store.get(str(run.id))
+    if live and run.status == "running":
+        detail = live.to_dict()
+    return RunSummary(
+        id=run.id,
+        dataset_id=run.dataset_id,
+        name=run.name,
+        tier=run.tier,
+        status=run.status,
+        progress=live.progress_pct if live and run.status == "running" else run.progress,
+        total_calls=run.total_calls,
+        completed_calls=live.jobs_completed if live and run.status == "running" else run.completed_calls,
+        failed_calls=live.jobs_failed if live and run.status == "running" else run.failed_calls,
+        jobs_total=cfg.get("jobs_total") or (live.jobs_total if live else None),
+        progress_detail=detail,
+        summary_json=run.summary_json,
+        error_message=run.error_message,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
 
 router = APIRouter(prefix="/api/v1", tags=["api"])
 
@@ -137,21 +166,7 @@ async def list_runs(session: AsyncSession = Depends(get_session)) -> list[RunSum
     )
     runs = result.all()
     return [
-        RunSummary(
-            id=r.id,
-            dataset_id=r.dataset_id,
-            name=r.name,
-            tier=r.tier,
-            status=r.status,
-            progress=r.progress,
-            total_calls=r.total_calls,
-            completed_calls=r.completed_calls,
-            failed_calls=r.failed_calls,
-            summary_json=r.summary_json,
-            error_message=r.error_message,
-            created_at=r.created_at,
-            updated_at=r.updated_at,
-        )
+        _run_summary(r)
         for r in runs
     ]
 
@@ -231,21 +246,7 @@ async def create_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     background_tasks.add_task(run_service._process_run, run.id)
-    return RunSummary(
-        id=run.id,
-        dataset_id=run.dataset_id,
-        name=run.name,
-        tier=run.tier,
-        status=run.status,
-        progress=run.progress,
-        total_calls=run.total_calls,
-        completed_calls=run.completed_calls,
-        failed_calls=run.failed_calls,
-        summary_json=run.summary_json,
-        error_message=run.error_message,
-        created_at=run.created_at,
-        updated_at=run.updated_at,
-    )
+    return _run_summary(run)
 
 
 @router.get("/runs/{run_id}", response_model=RunSummary)
@@ -255,28 +256,15 @@ async def get_run(
     run = await session.get(BenchmarkRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return RunSummary(
-        id=run.id,
-        dataset_id=run.dataset_id,
-        name=run.name,
-        tier=run.tier,
-        status=run.status,
-        progress=run.progress,
-        total_calls=run.total_calls,
-        completed_calls=run.completed_calls,
-        failed_calls=run.failed_calls,
-        summary_json=run.summary_json,
-        error_message=run.error_message,
-        created_at=run.created_at,
-        updated_at=run.updated_at,
-    )
+    return _run_summary(run)
 
 
-@router.post("/strength-sweep")
+@router.post("/strength-sweep", response_model=StrengthSweepStartResponse)
 async def strength_sweep(
     payload: StrengthSweepRequest,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
-) -> dict:
+) -> StrengthSweepStartResponse:
     if not (payload.dtln_strengths or payload.hush_strengths or payload.hecttor_strengths):
         raise HTTPException(status_code=400, detail="Select at least one engine/strength")
 
@@ -287,7 +275,7 @@ async def strength_sweep(
             os.environ["HECTTOR_API_KEY"] = settings.hecttor_api_key
 
     try:
-        result = await run_service.run_strength_sweep(
+        plan = await run_service.start_strength_sweep(
             session,
             dataset_id=payload.dataset_id,
             dtln_strengths=payload.dtln_strengths,
@@ -304,9 +292,39 @@ async def strength_sweep(
             scoring=payload.scoring,
             execution_mode=payload.execution_mode,
         )
-        return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    sweep_id = plan["sweep_id"]
+    background_tasks.add_task(
+        run_service._process_strength_sweep,
+        sweep_id,
+        dataset_id=payload.dataset_id,
+        dtln_strengths=payload.dtln_strengths,
+        hush_strengths=payload.hush_strengths,
+        hecttor_strengths=payload.hecttor_strengths,
+        hecttor_models=payload.hecttor_models,
+        max_calls=payload.max_calls,
+        turn_align=payload.turn_align,
+        workers=payload.workers,
+        stt_provider=payload.stt_provider,
+        stt_model=payload.stt_model,
+        stt_language=payload.stt_language,
+        stt_preset_ids=payload.stt_preset_ids or None,
+        scoring=payload.scoring,
+        execution_mode=payload.execution_mode,
+    )
+    return StrengthSweepStartResponse(**plan)
+
+
+@router.get("/strength-sweep/{sweep_id}/progress", response_model=TaskProgressSummary)
+async def strength_sweep_progress(sweep_id: str) -> TaskProgressSummary:
+    from app.progress import progress_store
+
+    snap = progress_store.get(sweep_id)
+    if not snap:
+        raise HTTPException(status_code=404, detail="Sweep not found or expired")
+    return TaskProgressSummary(**snap.to_dict())
 
 
 @router.get("/runs/{run_id}/results", response_model=list[CallResultSummary])

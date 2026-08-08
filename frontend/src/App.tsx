@@ -1,5 +1,14 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { api, CallResult, Dataset, Diagnostics, Run, SweepResponse, SweepResult } from "./api";
+import {
+  api,
+  CallResult,
+  Dataset,
+  Diagnostics,
+  Run,
+  SweepResponse,
+  SweepResult,
+  TaskProgress,
+} from "./api";
 
 function statusBadge(status: string) {
   const cls =
@@ -511,6 +520,116 @@ function JobEstimatePanel({ estimate }: { estimate: RunJobEstimate | null }) {
   );
 }
 
+function RunProgressPanel({
+  progress,
+  title,
+}: {
+  progress: TaskProgress | null | undefined;
+  title?: string;
+}) {
+  if (!progress) return null;
+
+  const fmt = (n: number) => n.toLocaleString();
+  const pct = Math.min(100, Math.max(0, progress.progress_pct));
+
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-slate-800">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="font-medium text-slate-900">
+          {title ?? (progress.task_type === "sweep" ? "Strength sweep progress" : "Run progress")}
+        </span>
+        {statusBadge(progress.status)}
+      </div>
+
+      <div className="mb-2 h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
+        <div
+          className="h-full rounded-full bg-slate-900 transition-all duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+
+      <dl className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <dt className="text-slate-500">Jobs</dt>
+          <dd className="font-medium">
+            {fmt(progress.jobs_completed)} / {fmt(progress.jobs_total)} ({pct}%)
+          </dd>
+        </div>
+        <div>
+          <dt className="text-slate-500">Calls</dt>
+          <dd className="font-medium">
+            {fmt(progress.calls_completed)} fully done · {fmt(progress.calls_touched)} touched /{" "}
+            {fmt(progress.calls_total)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-slate-500">Failed jobs</dt>
+          <dd className="font-medium">{fmt(progress.jobs_failed)}</dd>
+        </div>
+        {progress.jobs_cached > 0 ? (
+          <div>
+            <dt className="text-slate-500">Cached</dt>
+            <dd className="font-medium">{fmt(progress.jobs_cached)}</dd>
+          </div>
+        ) : null}
+      </dl>
+
+      {progress.stt_stats.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1 font-medium text-slate-700">STT progress</div>
+          <div className="space-y-1.5">
+            {progress.stt_stats.map((stt) => (
+              <div key={stt.stt_id}>
+                <div className="flex justify-between text-[11px] text-slate-600">
+                  <span>{stt.label}</span>
+                  <span>
+                    {stt.completed}/{stt.total} ({stt.pct}%)
+                  </span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full rounded-full bg-blue-700 transition-all duration-500"
+                    style={{ width: `${stt.pct}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {progress.trial_stats.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1 font-medium text-slate-700">
+            Strength trials ({progress.trial_stats.filter((t) => t.pct >= 100).length} /{" "}
+            {progress.trial_stats.length} complete)
+          </div>
+          <div className="max-h-40 space-y-1 overflow-y-auto">
+            {progress.trial_stats.map((trial) => (
+              <div key={trial.label} className="flex items-center gap-2 text-[11px]">
+                <span className="w-28 shrink-0 truncate text-slate-600">{trial.label}</span>
+                <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full rounded-full bg-emerald-600 transition-all duration-500"
+                    style={{ width: `${trial.pct}%` }}
+                  />
+                </div>
+                <span className="w-16 shrink-0 text-right text-slate-500">
+                  {trial.completed}/{trial.total}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {progress.error && (
+        <p className="mt-2 text-[11px] text-rose-700">{progress.error}</p>
+      )}
+    </div>
+  );
+}
+
 function SweepResultsTable({
   sweepResult,
   onDownload,
@@ -720,6 +839,8 @@ export default function App() {
   const [hecttorAll, setHecttorAll] = useState(false);
   const [sweepRunning, setSweepRunning] = useState(false);
   const [sweepResult, setSweepResult] = useState<SweepResponse | null>(null);
+  const [activeSweepId, setActiveSweepId] = useState<string | null>(null);
+  const [sweepProgress, setSweepProgress] = useState<TaskProgress | null>(null);
   const [workers, setWorkers] = useState(8);
   const [sttSelected, setSttSelected] = useState<Set<string>>(
     () => new Set(STT_PRESETS.map((p) => p.id)),
@@ -792,9 +913,48 @@ export default function App() {
       } catch {
         /* ignore polling errors */
       }
-    }, 3000);
+    }, 2000);
     return () => clearInterval(timer);
   }, [selectedRunId]);
+
+  const anyRunRunning = runs.some((r) => r.status === "running");
+
+  useEffect(() => {
+    if (!anyRunRunning) return;
+    const timer = setInterval(async () => {
+      try {
+        const rs = await api.listRuns();
+        setRuns(rs);
+      } catch {
+        /* ignore */
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [anyRunRunning]);
+
+  useEffect(() => {
+    if (!activeSweepId || !sweepRunning) return;
+    const poll = async () => {
+      try {
+        const snap = await api.getSweepProgress(activeSweepId);
+        setSweepProgress(snap);
+        if (snap.status === "completed" && snap.result) {
+          setSweepResult(snap.result);
+          setSweepRunning(false);
+          setActiveSweepId(null);
+        } else if (snap.status === "failed") {
+          setError(snap.error || "Strength sweep failed");
+          setSweepRunning(false);
+          setActiveSweepId(null);
+        }
+      } catch {
+        /* ignore transient 404 while sweep starts */
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 2000);
+    return () => clearInterval(timer);
+  }, [activeSweepId, sweepRunning]);
 
   const handleImportPath = async () => {
     try {
@@ -841,10 +1001,11 @@ export default function App() {
     if (enableSweep && hasSweepSelection) {
       setSweepRunning(true);
       setSweepResult(null);
+      setSweepProgress(null);
       setError(null);
       try {
         const alignValue = turnAlign === "full" ? "vad" : turnAlign;
-        const res = await api.strengthSweep({
+        const start = await api.strengthSweep({
           dataset_id: Number(datasetId),
           dtln_strengths: effectiveDtln,
           hush_strengths: effectiveHush,
@@ -855,11 +1016,32 @@ export default function App() {
           workers,
           stt_preset_ids: effectiveSttPresets,
         });
-        setSweepResult(res);
+        setActiveSweepId(start.sweep_id);
+        setSweepProgress({
+          task_id: start.sweep_id,
+          task_type: "sweep",
+          status: "running",
+          progress_pct: 0,
+          jobs_total: start.jobs_total,
+          jobs_completed: 0,
+          jobs_failed: 0,
+          jobs_cached: 0,
+          calls_total: start.total_calls,
+          calls_touched: 0,
+          calls_completed: 0,
+          stt_stats: start.stt_configs.map((s) => ({
+            stt_id: s.stt_id,
+            label: s.stt_id,
+            completed: 0,
+            total: start.total_calls * start.trials_count,
+            pct: 0,
+          })),
+          trial_stats: [],
+        });
       } catch (err) {
         setError(err instanceof Error ? err.message : "Strength sweep failed");
-      } finally {
         setSweepRunning(false);
+        setActiveSweepId(null);
       }
       return;
     }
@@ -1241,6 +1423,16 @@ export default function App() {
 
             <JobEstimatePanel estimate={runJobEstimate} />
 
+            {(sweepRunning && sweepProgress) || selectedRun?.status === "running" ? (
+              <RunProgressPanel
+                progress={
+                  sweepRunning
+                    ? sweepProgress
+                    : (selectedRun?.progress_detail as TaskProgress | undefined)
+                }
+              />
+            ) : null}
+
             <button
               className="btn"
               onClick={handleCreateRun}
@@ -1254,7 +1446,7 @@ export default function App() {
             </button>
             {sweepRunning && (
               <p className="text-xs text-slate-500">
-                This may take several minutes depending on dataset size and number of strengths selected.
+                Strength sweep running — progress updates every few seconds.
               </p>
             )}
           </div>
@@ -1282,8 +1474,23 @@ export default function App() {
                     {statusBadge(run.status)}
                   </div>
                   <div className="mt-1 text-xs text-slate-500">
-                    {run.tier} · {run.completed_calls}/{run.total_calls} · {run.progress}%
+                    {run.tier}
+                    {run.jobs_total ? (
+                      <> · jobs {run.completed_calls}/{run.jobs_total}</>
+                    ) : (
+                      <> · {run.completed_calls}/{run.total_calls} calls</>
+                    )}
+                    {" · "}
+                    {run.progress}%
                   </div>
+                  {run.status === "running" && (
+                    <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-slate-200">
+                      <div
+                        className="h-full rounded-full bg-blue-600 transition-all duration-500"
+                        style={{ width: `${Math.min(100, run.progress)}%` }}
+                      />
+                    </div>
+                  )}
                 </button>
               </li>
             ))}

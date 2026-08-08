@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import BenchmarkRun, CallRecord, CallResult, Dataset
+from app.progress import progress_store
 from worker.parallel import amap_parallel
 from worker.parallel_jobs import run_strength_job, run_tier_job
 from worker.wer import aggregate_engine_ranking
@@ -202,12 +204,52 @@ async def _process_run(run_id: int) -> None:
             )
             cpu_threads = settings.worker_cpu_threads
 
-        raw_results = await amap_parallel(
-            run_tier_job,
-            jobs,
-            max_workers=workers,
-            cpu_threads=cpu_threads,
-        )
+        task_id = str(run.id)
+        progress_store.create(task_id, "run", jobs)
+
+        async def _flush_run_progress() -> None:
+            snap = progress_store.get(task_id)
+            if not snap:
+                return
+            run.progress = snap.progress_pct
+            run.completed_calls = snap.jobs_completed
+            run.failed_calls = snap.jobs_failed
+            cfg = dict(run.config_json or {})
+            cfg["progress_detail"] = snap.to_dict()
+            cfg["jobs_total"] = snap.jobs_total
+            run.config_json = cfg
+            run.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+        async def _progress_poller() -> None:
+            try:
+                while True:
+                    snap = progress_store.get(task_id)
+                    if not snap or snap.status != "running":
+                        break
+                    await _flush_run_progress()
+                    await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                pass
+
+        def _on_job_complete(
+            _done: int, _total: int, job: dict[str, Any], result: Any
+        ) -> None:
+            progress_store.record_job(task_id, job, result)
+
+        poller = asyncio.create_task(_progress_poller())
+        try:
+            raw_results = await amap_parallel(
+                run_tier_job,
+                jobs,
+                max_workers=workers,
+                cpu_threads=cpu_threads,
+                on_complete=_on_job_complete,
+            )
+        finally:
+            poller.cancel()
+            await asyncio.gather(poller, return_exceptions=True)
+            await _flush_run_progress()
 
         completed = 0
         failed = 0
@@ -260,6 +302,8 @@ async def _process_run(run_id: int) -> None:
         run.failed_calls = failed
         run.progress = 100.0
         run.updated_at = datetime.now(timezone.utc)
+        cfg = dict(run.config_json or {})
+        cfg["jobs_total"] = len(jobs)
 
         if reports:
             from worker.nc_engines import expected_labels_for_tier
@@ -285,6 +329,12 @@ async def _process_run(run_id: int) -> None:
         if completed == 0:
             run.status = "failed"
             run.error_message = "All calls failed"
+        final_status = run.status
+        snap = progress_store.get(task_id)
+        if snap:
+            progress_store.finish(task_id, status=final_status)
+            cfg["progress_detail"] = progress_store.get(task_id).to_dict()  # type: ignore[union-attr]
+        run.config_json = cfg
         await session.commit()
 
 
@@ -416,6 +466,135 @@ def _aggregate_strength_results(
     return out
 
 
+async def start_strength_sweep(
+    session: AsyncSession,
+    *,
+    dataset_id: int,
+    dtln_strengths: list[float],
+    hush_strengths: list[float],
+    hecttor_strengths: list[float],
+    hecttor_models: list[str],
+    max_calls: int | None,
+    turn_align: str,
+    workers: int | None = None,
+    stt_provider: str | None = None,
+    stt_model: str | None = None,
+    stt_language: str | None = None,
+    stt_preset_ids: list[str] | None = None,
+    scoring: str | None = None,
+    execution_mode: str | None = None,
+) -> dict:
+    """Validate sweep inputs and return sweep_id + job plan (work runs in background)."""
+    dataset = await session.get(Dataset, dataset_id)
+    if not dataset:
+        raise ValueError("Dataset not found")
+
+    query = select(CallRecord).where(CallRecord.dataset_id == dataset_id)
+    calls_result = await session.scalars(query)
+    call_list = list(calls_result.all())
+    if max_calls and max_calls < len(call_list):
+        call_list = call_list[:max_calls]
+
+    trials: list[dict] = []
+    if dtln_strengths:
+        for s in dtln_strengths:
+            trials.append({"engine": "dtln", "strength": s})
+    if hush_strengths:
+        for s in hush_strengths:
+            trials.append({"engine": "hush", "strength": s})
+    if hecttor_strengths:
+        for s in hecttor_strengths:
+            trials.append({"engine": "hecttor", "strength": s})
+
+    stt_configs = _resolve_stt_job_configs(
+        {
+            "stt_preset_ids": stt_preset_ids,
+            "stt_provider": stt_provider,
+            "stt_model": stt_model,
+            "stt_language": stt_language,
+        }
+    )
+    jobs_total = len(call_list) * len(trials) * len(stt_configs)
+    sweep_id = uuid.uuid4().hex
+
+    stub_jobs = [
+        {
+            "call_id": call.call_log_id,
+            "stt_id": stt["stt_id"],
+            "stt_provider": stt["stt_provider"],
+            "stt_model": stt["stt_model"],
+            "engine": trial["engine"],
+            "strength": trial["strength"],
+        }
+        for stt in stt_configs
+        for trial in trials
+        for call in call_list
+    ]
+    progress_store.create(sweep_id, "sweep", stub_jobs)
+
+    return {
+        "sweep_id": sweep_id,
+        "status": "running",
+        "dataset_id": dataset_id,
+        "dataset_name": dataset.name,
+        "total_calls": len(call_list),
+        "turn_align": turn_align,
+        "scoring": scoring or settings.default_scoring,
+        "execution_mode": execution_mode or settings.default_execution_mode,
+        "jobs_total": jobs_total,
+        "stt_configs": stt_configs,
+        "trials_count": len(trials),
+    }
+
+
+async def _process_strength_sweep(
+    sweep_id: str,
+    *,
+    dataset_id: int,
+    dtln_strengths: list[float],
+    hush_strengths: list[float],
+    hecttor_strengths: list[float],
+    hecttor_models: list[str],
+    max_calls: int | None,
+    turn_align: str,
+    workers: int | None = None,
+    stt_provider: str | None = None,
+    stt_model: str | None = None,
+    stt_language: str | None = None,
+    stt_preset_ids: list[str] | None = None,
+    scoring: str | None = None,
+    execution_mode: str | None = None,
+) -> None:
+    """Background strength sweep with live progress updates."""
+    from app.database import SessionLocal
+
+    _set_parallel_env()
+
+    async with SessionLocal() as session:
+        try:
+            result = await run_strength_sweep(
+                session,
+                dataset_id=dataset_id,
+                dtln_strengths=dtln_strengths,
+                hush_strengths=hush_strengths,
+                hecttor_strengths=hecttor_strengths,
+                hecttor_models=hecttor_models,
+                max_calls=max_calls,
+                turn_align=turn_align,
+                workers=workers,
+                stt_provider=stt_provider,
+                stt_model=stt_model,
+                stt_language=stt_language,
+                stt_preset_ids=stt_preset_ids,
+                scoring=scoring,
+                execution_mode=execution_mode,
+                sweep_id=sweep_id,
+            )
+            progress_store.finish(sweep_id, status="completed", result=result)
+        except Exception as exc:
+            progress_store.finish(sweep_id, status="failed", error=str(exc))
+
+
 async def run_strength_sweep(
     session: AsyncSession,
     *,
@@ -433,6 +612,7 @@ async def run_strength_sweep(
     stt_preset_ids: list[str] | None = None,
     scoring: str | None = None,
     execution_mode: str | None = None,
+    sweep_id: str | None = None,
 ) -> dict:
     """Strength sweep with multiprocessing fan-out across call×engine×strength."""
     _set_parallel_env()
@@ -512,11 +692,21 @@ async def run_strength_sweep(
         for job in jobs:
             job["cpu_threads"] = sweep_cpu_threads
 
+    task_id = sweep_id or uuid.uuid4().hex
+    if not progress_store.get(task_id):
+        progress_store.create(task_id, "sweep", jobs)
+
+    def _on_job_complete(
+        _done: int, _total: int, job: dict[str, Any], result: Any
+    ) -> None:
+        progress_store.record_job(task_id, job, result)
+
     raw_results = await amap_parallel(
         run_strength_job,
         jobs,
         max_workers=max_workers,
         cpu_threads=sweep_cpu_threads,
+        on_complete=_on_job_complete,
     )
 
     grouped: dict[tuple[str, float, str, str], list[dict]] = defaultdict(list)
@@ -565,6 +755,7 @@ async def run_strength_sweep(
             )
 
     return {
+        "sweep_id": task_id,
         "dataset_id": dataset_id,
         "dataset_name": dataset.name,
         "total_calls": len(call_list),

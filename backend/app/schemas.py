@@ -38,10 +38,44 @@ class RunSummary(BaseModel):
     total_calls: int
     completed_calls: int
     failed_calls: int
+    jobs_total: int | None = None
+    progress_detail: dict[str, Any] | None = None
     summary_json: dict | None = None
     error_message: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class TaskProgressSummary(BaseModel):
+    task_id: str
+    task_type: str
+    status: str
+    progress_pct: float
+    jobs_total: int
+    jobs_completed: int
+    jobs_failed: int
+    jobs_cached: int
+    calls_total: int
+    calls_touched: int
+    calls_completed: int
+    stt_stats: list[dict[str, Any]] = Field(default_factory=list)
+    trial_stats: list[dict[str, Any]] = Field(default_factory=list)
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class StrengthSweepStartResponse(BaseModel):
+    sweep_id: str
+    status: str
+    dataset_id: int
+    dataset_name: str
+    total_calls: int
+    turn_align: str
+    scoring: str
+    execution_mode: str
+    jobs_total: int
+    stt_configs: list[dict[str, Any]] = Field(default_factory=list)
+    trials_count: int = 0
 
 
 class CallResultSummary(BaseModel):

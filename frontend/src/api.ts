@@ -17,10 +17,47 @@ export type Run = {
   total_calls: number;
   completed_calls: number;
   failed_calls: number;
+  jobs_total?: number | null;
+  progress_detail?: TaskProgress | null;
   summary_json?: Record<string, unknown> | null;
   error_message?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+};
+
+export type SttProgressStat = {
+  stt_id: string;
+  label: string;
+  completed: number;
+  total: number;
+  pct: number;
+};
+
+export type TrialProgressStat = {
+  engine: string;
+  strength: number;
+  label: string;
+  completed: number;
+  total: number;
+  pct: number;
+};
+
+export type TaskProgress = {
+  task_id: string;
+  task_type: "run" | "sweep";
+  status: string;
+  progress_pct: number;
+  jobs_total: number;
+  jobs_completed: number;
+  jobs_failed: number;
+  jobs_cached: number;
+  calls_total: number;
+  calls_touched: number;
+  calls_completed: number;
+  stt_stats: SttProgressStat[];
+  trial_stats: TrialProgressStat[];
+  result?: SweepResponse | null;
+  error?: string | null;
 };
 
 export type CallResult = {
@@ -104,6 +141,7 @@ export type SttConfig = {
 };
 
 export type SweepResponse = {
+  sweep_id?: string;
   dataset_id: number;
   dataset_name: string;
   total_calls: number;
@@ -117,6 +155,20 @@ export type SweepResponse = {
   jobs_cached?: number;
   stt_configs?: SttConfig[];
   results: SweepResult[];
+};
+
+export type StrengthSweepStart = {
+  sweep_id: string;
+  status: string;
+  dataset_id: number;
+  dataset_name: string;
+  total_calls: number;
+  turn_align: string;
+  scoring: string;
+  execution_mode: string;
+  jobs_total: number;
+  stt_configs: SttConfig[];
+  trials_count: number;
 };
 
 export const api = {
@@ -168,9 +220,11 @@ export const api = {
     stt_language?: string;
     stt_preset_ids?: string[];
   }) =>
-    request<SweepResponse>("/strength-sweep", {
+    request<StrengthSweepStart>("/strength-sweep", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }),
+  getSweepProgress: (sweepId: string) =>
+    request<TaskProgress>(`/strength-sweep/${sweepId}/progress`),
 };
