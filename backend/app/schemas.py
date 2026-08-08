@@ -58,15 +58,26 @@ class TaskProgressSummary(BaseModel):
     calls_total: int
     calls_touched: int
     calls_completed: int
+    run_dir: str | None = None
+    stt_results: list[dict[str, Any]] = Field(default_factory=list)
     stt_stats: list[dict[str, Any]] = Field(default_factory=list)
     trial_stats: list[dict[str, Any]] = Field(default_factory=list)
     result: dict[str, Any] | None = None
     error: str | None = None
 
 
+class SttSweepResultSummary(BaseModel):
+    stt_id: str
+    label: str
+    file_name: str
+    results_count: int
+    ready: bool = True
+
+
 class StrengthSweepStartResponse(BaseModel):
     sweep_id: str
     status: str
+    run_dir: str | None = None
     dataset_id: int
     dataset_name: str
     total_calls: int

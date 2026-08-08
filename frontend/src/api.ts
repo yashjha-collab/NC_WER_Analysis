@@ -33,6 +33,14 @@ export type SttProgressStat = {
   pct: number;
 };
 
+export type SttResultReady = {
+  stt_id: string;
+  label: string;
+  file_name: string;
+  results_count: number;
+  ready?: boolean;
+};
+
 export type TrialProgressStat = {
   engine: string;
   strength: number;
@@ -54,6 +62,8 @@ export type TaskProgress = {
   calls_total: number;
   calls_touched: number;
   calls_completed: number;
+  run_dir?: string | null;
+  stt_results?: SttResultReady[];
   stt_stats: SttProgressStat[];
   trial_stats: TrialProgressStat[];
   result?: SweepResponse | null;
@@ -142,6 +152,10 @@ export type SttConfig = {
 
 export type SweepResponse = {
   sweep_id?: string;
+  stt_id?: string;
+  stt_provider?: string;
+  stt_model?: string;
+  stt_language?: string;
   dataset_id: number;
   dataset_name: string;
   total_calls: number;
@@ -160,6 +174,7 @@ export type SweepResponse = {
 export type StrengthSweepStart = {
   sweep_id: string;
   status: string;
+  run_dir?: string;
   dataset_id: number;
   dataset_name: string;
   total_calls: number;
@@ -227,4 +242,10 @@ export const api = {
     }),
   getSweepProgress: (sweepId: string) =>
     request<TaskProgress>(`/strength-sweep/${sweepId}/progress`),
+  listSweepSttResults: (sweepId: string) =>
+    request<SttResultReady[]>(`/strength-sweep/${sweepId}/results`),
+  getSweepSttResults: (sweepId: string, sttId: string) =>
+    request<SweepResponse>(`/strength-sweep/${sweepId}/results/${encodeURIComponent(sttId)}`),
+  getSweepAllResults: (sweepId: string) =>
+    request<SweepResponse>(`/strength-sweep/${sweepId}/results-all`),
 };

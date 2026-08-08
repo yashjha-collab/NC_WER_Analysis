@@ -466,6 +466,126 @@ def _aggregate_strength_results(
     return out
 
 
+def _safe_stt_file_id(stt_id: str) -> str:
+    return stt_id.replace("/", "_").replace(":", "_")
+
+
+def _aggregate_sweep_for_stt(
+    *,
+    stt: dict[str, str],
+    trials: list[dict],
+    grouped: dict[tuple[str, float, str, str], list[dict]],
+) -> list[dict]:
+    results: list[dict] = []
+    for trial in trials:
+        engine = trial["engine"]
+        strength = float(trial["strength"])
+        key = (engine, strength, stt["stt_provider"], stt["stt_model"])
+        results.extend(
+            _aggregate_strength_results(
+                engine=engine,
+                strength=strength,
+                call_reports=grouped.get(key, []),
+                stt_provider=stt["stt_provider"],
+                stt_model=stt["stt_model"],
+                stt_id=stt["stt_id"],
+            )
+        )
+    return results
+
+
+def _build_stt_sweep_payload(
+    *,
+    sweep_id: str,
+    stt: dict[str, str],
+    results: list[dict],
+    dataset_id: int,
+    dataset_name: str,
+    total_calls: int,
+    turn_align: str,
+    scoring: str,
+    execution_mode: str,
+    workers: int,
+    stt_configs: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "sweep_id": sweep_id,
+        "stt_id": stt["stt_id"],
+        "stt_provider": stt["stt_provider"],
+        "stt_model": stt["stt_model"],
+        "stt_language": stt["stt_language"],
+        "dataset_id": dataset_id,
+        "dataset_name": dataset_name,
+        "total_calls": total_calls,
+        "turn_align": turn_align,
+        "scoring": scoring,
+        "execution_mode": execution_mode,
+        "workers": workers,
+        "stt_configs": stt_configs,
+        "results": results,
+    }
+
+
+def _write_stt_sweep_result(run_dir: Path, stt_id: str, payload: dict[str, Any]) -> Path:
+    file_name = f"results_{_safe_stt_file_id(stt_id)}.json"
+    path = run_dir / file_name
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _maybe_finalize_stt_sweep(
+    *,
+    task_id: str,
+    stt: dict[str, str],
+    trials: list[dict],
+    grouped: dict[tuple[str, float, str, str], list[dict]],
+    run_dir: Path,
+    dataset_id: int,
+    dataset_name: str,
+    total_calls: int,
+    turn_align: str,
+    scoring: str,
+    execution_mode: str,
+    workers: int,
+    stt_configs: list[dict[str, str]],
+) -> None:
+    stt_id = stt["stt_id"]
+    if progress_store.is_stt_written(task_id, stt_id):
+        return
+    if not progress_store.stt_jobs_complete(task_id, stt_id):
+        return
+
+    results = _aggregate_sweep_for_stt(stt=stt, trials=trials, grouped=grouped)
+    payload = _build_stt_sweep_payload(
+        sweep_id=task_id,
+        stt=stt,
+        results=results,
+        dataset_id=dataset_id,
+        dataset_name=dataset_name,
+        total_calls=total_calls,
+        turn_align=turn_align,
+        scoring=scoring,
+        execution_mode=execution_mode,
+        workers=workers,
+        stt_configs=stt_configs,
+    )
+    path = _write_stt_sweep_result(run_dir, stt_id, payload)
+    label = stt_id
+    snap = progress_store.get(task_id)
+    if snap:
+        for s in snap.stt_stats:
+            if s.stt_id == stt_id:
+                label = s.label
+                break
+    progress_store.mark_stt_ready(
+        task_id,
+        stt_id=stt_id,
+        label=label,
+        file_name=path.name,
+        results_count=len(results),
+    )
+
+
 async def start_strength_sweep(
     session: AsyncSession,
     *,
@@ -516,6 +636,8 @@ async def start_strength_sweep(
     )
     jobs_total = len(call_list) * len(trials) * len(stt_configs)
     sweep_id = uuid.uuid4().hex
+    run_dir = settings.runs_dir / f"sweep_{sweep_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     stub_jobs = [
         {
@@ -531,9 +653,26 @@ async def start_strength_sweep(
         for call in call_list
     ]
     progress_store.create(sweep_id, "sweep", stub_jobs)
+    progress_store.set_run_dir(sweep_id, str(run_dir))
+
+    manifest = {
+        "sweep_id": sweep_id,
+        "dataset_id": dataset_id,
+        "dataset_name": dataset.name,
+        "total_calls": len(call_list),
+        "turn_align": turn_align,
+        "scoring": scoring or settings.default_scoring,
+        "execution_mode": execution_mode or settings.default_execution_mode,
+        "trials": trials,
+        "stt_configs": stt_configs,
+    }
+    (run_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     return {
         "sweep_id": sweep_id,
+        "run_dir": str(run_dir),
         "status": "running",
         "dataset_id": dataset_id,
         "dataset_name": dataset.name,
@@ -627,11 +766,10 @@ async def run_strength_sweep(
     if max_calls and max_calls < len(call_list):
         call_list = call_list[:max_calls]
 
-    run_dir = (
-        settings.runs_dir
-        / f"sweep_{dataset_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-    )
+    task_id = sweep_id or uuid.uuid4().hex
+    run_dir = settings.runs_dir / f"sweep_{task_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    progress_store.set_run_dir(task_id, str(run_dir))
 
     trials: list[dict] = []
     if dtln_strengths:
@@ -696,10 +834,44 @@ async def run_strength_sweep(
     if not progress_store.get(task_id):
         progress_store.create(task_id, "sweep", jobs)
 
+    grouped: dict[tuple[str, float, str, str], list[dict]] = defaultdict(list)
+    sweep_meta = {
+        "trials": trials,
+        "stt_configs": stt_configs,
+        "dataset_id": dataset_id,
+        "dataset_name": dataset.name,
+        "total_calls": len(call_list),
+        "turn_align": turn_align,
+        "scoring": scoring_mode,
+        "execution_mode": mode,
+        "workers": max_workers,
+    }
+
     def _on_job_complete(
         _done: int, _total: int, job: dict[str, Any], result: Any
     ) -> None:
         progress_store.record_job(task_id, job, result)
+        if isinstance(result, dict) and result.get("ok") and result.get("report"):
+            key = (
+                result["engine"],
+                float(result["strength"]),
+                result.get("stt_provider", ""),
+                result.get("stt_model", ""),
+            )
+            grouped[key].append(result["report"])
+            stt_id = str(job.get("stt_id") or _safe_stt_file_id(
+                f"{job.get('stt_provider')}/{job.get('stt_model')}"
+            ))
+            for stt in stt_configs:
+                if stt["stt_id"] == stt_id:
+                    _maybe_finalize_stt_sweep(
+                        task_id=task_id,
+                        stt=stt,
+                        grouped=grouped,
+                        run_dir=run_dir,
+                        **sweep_meta,
+                    )
+                    break
 
     raw_results = await amap_parallel(
         run_strength_job,
@@ -709,7 +881,6 @@ async def run_strength_sweep(
         on_complete=_on_job_complete,
     )
 
-    grouped: dict[tuple[str, float, str, str], list[dict]] = defaultdict(list)
     errors = 0
     cached = 0
     for item in raw_results:
@@ -721,40 +892,25 @@ async def run_strength_sweep(
             continue
         if item.get("cached"):
             cached += 1
-        if item.get("ok") and item.get("report"):
-            key = (
-                item["engine"],
-                float(item["strength"]),
-                item.get("stt_provider", ""),
-                item.get("stt_model", ""),
-            )
-            grouped[key].append(item["report"])
-        else:
+        if not (item.get("ok") and item.get("report")):
             errors += 1
+
+    for stt in stt_configs:
+        _maybe_finalize_stt_sweep(
+            task_id=task_id,
+            stt=stt,
+            grouped=grouped,
+            run_dir=run_dir,
+            **sweep_meta,
+        )
 
     results: list[dict] = []
     for stt in stt_configs:
-        for trial in trials:
-            engine = trial["engine"]
-            strength = float(trial["strength"])
-            key = (
-                engine,
-                strength,
-                stt["stt_provider"],
-                stt["stt_model"],
-            )
-            results.extend(
-                _aggregate_strength_results(
-                    engine=engine,
-                    strength=strength,
-                    call_reports=grouped.get(key, []),
-                    stt_provider=stt["stt_provider"],
-                    stt_model=stt["stt_model"],
-                    stt_id=stt["stt_id"],
-                )
-            )
+        results.extend(
+            _aggregate_sweep_for_stt(stt=stt, trials=trials, grouped=grouped)
+        )
 
-    return {
+    combined_payload = {
         "sweep_id": task_id,
         "dataset_id": dataset_id,
         "dataset_name": dataset.name,
@@ -770,3 +926,9 @@ async def run_strength_sweep(
         "stt_configs": stt_configs,
         "results": results,
     }
+    (run_dir / "results_all.json").write_text(
+        json.dumps(combined_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return combined_payload

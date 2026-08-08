@@ -38,6 +38,14 @@ class TrialProgress:
 
 
 @dataclass
+class SttResultReady:
+    stt_id: str
+    label: str
+    file_name: str
+    results_count: int = 0
+
+
+@dataclass
 class TaskProgress:
     task_id: str
     task_type: str  # "run" | "sweep"
@@ -49,6 +57,8 @@ class TaskProgress:
     calls_total: int = 0
     calls_touched: int = 0
     calls_completed: int = 0
+    run_dir: str | None = None
+    stt_results: list[SttResultReady] = field(default_factory=list)
     stt_stats: list[SttProgress] = field(default_factory=list)
     trial_stats: list[TrialProgress] = field(default_factory=list)
     result: dict[str, Any] | None = None
@@ -60,6 +70,7 @@ class TaskProgress:
     _call_done: dict[str, int] = field(default_factory=dict, repr=False)
     _calls_touched_set: set[str] = field(default_factory=set, repr=False)
     _calls_completed_set: set[str] = field(default_factory=set, repr=False)
+    _stt_written: set[str] = field(default_factory=set, repr=False)
 
     @property
     def progress_pct(self) -> float:
@@ -80,6 +91,16 @@ class TaskProgress:
             "calls_total": self.calls_total,
             "calls_touched": self.calls_touched,
             "calls_completed": self.calls_completed,
+            "run_dir": self.run_dir,
+            "stt_results": [
+                {
+                    "stt_id": r.stt_id,
+                    "label": r.label,
+                    "file_name": r.file_name,
+                    "results_count": r.results_count,
+                }
+                for r in self.stt_results
+            ],
             "stt_stats": [
                 {
                     "stt_id": s.stt_id,
@@ -211,6 +232,48 @@ class ProgressStore:
             tk = _trial_key(job)
             if tk and tk in task._trial_index:
                 task._trial_index[tk].completed += 1
+
+    def set_run_dir(self, task_id: str, run_dir: str) -> None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task:
+                task.run_dir = run_dir
+
+    def mark_stt_ready(
+        self,
+        task_id: str,
+        *,
+        stt_id: str,
+        label: str,
+        file_name: str,
+        results_count: int,
+    ) -> None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task or stt_id in task._stt_written:
+                return
+            task._stt_written.add(stt_id)
+            task.stt_results.append(
+                SttResultReady(
+                    stt_id=stt_id,
+                    label=label,
+                    file_name=file_name,
+                    results_count=results_count,
+                )
+            )
+
+    def is_stt_written(self, task_id: str, stt_id: str) -> bool:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            return bool(task and stt_id in task._stt_written)
+
+    def stt_jobs_complete(self, task_id: str, stt_id: str) -> bool:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return False
+            stat = task._stt_index.get(stt_id)
+            return bool(stat and stat.total > 0 and stat.completed >= stat.total)
 
     def finish(
         self,

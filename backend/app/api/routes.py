@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from app.schemas import (
     CreateRunRequest,
     DatasetSummary,
     RunSummary,
+    SttSweepResultSummary,
     StrengthSweepRequest,
     StrengthSweepStartResponse,
     TaskProgressSummary,
@@ -325,6 +327,101 @@ async def strength_sweep_progress(sweep_id: str) -> TaskProgressSummary:
     if not snap:
         raise HTTPException(status_code=404, detail="Sweep not found or expired")
     return TaskProgressSummary(**snap.to_dict())
+
+
+def _sweep_run_dir(sweep_id: str) -> Path:
+    from app.progress import progress_store
+
+    snap = progress_store.get(sweep_id)
+    if snap and snap.run_dir:
+        return Path(snap.run_dir)
+    return settings.runs_dir / f"sweep_{sweep_id}"
+
+
+def _safe_stt_file_id(stt_id: str) -> str:
+    return stt_id.replace("/", "_").replace(":", "_")
+
+
+def _stt_result_path(run_dir: Path, stt_id: str) -> Path:
+    return run_dir / f"results_{_safe_stt_file_id(stt_id)}.json"
+
+
+@router.get(
+    "/strength-sweep/{sweep_id}/results",
+    response_model=list[SttSweepResultSummary],
+)
+async def list_sweep_stt_results(sweep_id: str) -> list[SttSweepResultSummary]:
+    from app.progress import progress_store
+
+    run_dir = _sweep_run_dir(sweep_id)
+    snap = progress_store.get(sweep_id)
+    ready: list[SttSweepResultSummary] = []
+
+    if snap:
+        for item in snap.stt_results:
+            ready.append(
+                SttSweepResultSummary(
+                    stt_id=item.stt_id,
+                    label=item.label,
+                    file_name=item.file_name,
+                    results_count=item.results_count,
+                    ready=True,
+                )
+            )
+
+    if run_dir.is_dir():
+        for path in sorted(run_dir.glob("results_*.json")):
+            if path.name == "results_all.json":
+                continue
+            stt_id = path.stem.removeprefix("results_")
+            if any(r.stt_id == stt_id for r in ready):
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            ready.append(
+                SttSweepResultSummary(
+                    stt_id=str(payload.get("stt_id") or stt_id),
+                    label=str(payload.get("stt_id") or stt_id),
+                    file_name=path.name,
+                    results_count=len(payload.get("results") or []),
+                    ready=True,
+                )
+            )
+
+    if not ready and not snap:
+        raise HTTPException(status_code=404, detail="Sweep not found")
+    return ready
+
+
+@router.get("/strength-sweep/{sweep_id}/results/{stt_id}")
+async def get_sweep_stt_results(sweep_id: str, stt_id: str) -> dict:
+    run_dir = _sweep_run_dir(sweep_id)
+    path = _stt_result_path(run_dir, stt_id)
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Results not ready for STT '{stt_id}'",
+        )
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Corrupt results file") from exc
+
+
+@router.get("/strength-sweep/{sweep_id}/results-all")
+async def get_sweep_all_results(sweep_id: str) -> dict:
+    run_dir = _sweep_run_dir(sweep_id)
+    path = run_dir / "results_all.json"
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))
+    from app.progress import progress_store
+
+    snap = progress_store.get(sweep_id)
+    if snap and snap.result:
+        return snap.result
+    raise HTTPException(status_code=404, detail="Combined sweep results not ready")
 
 
 @router.get("/runs/{run_id}/results", response_model=list[CallResultSummary])

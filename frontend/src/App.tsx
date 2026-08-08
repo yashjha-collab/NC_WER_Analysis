@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   CallResult,
@@ -314,19 +314,16 @@ const STT_PRESETS = [
   { id: "sarvam-saaras-v3", label: "Sarvam Saaras v3" },
 ] as const;
 
-/** Tier A: none + dtln + hush + 5 hecttor sub-models */
-const TIER_A_NC_MODEL_COUNT = 8;
+/** Tier A NC engines: dtln + hush + 5 hecttor sub-models (excludes none baseline) */
 const HECTTOR_SUBMODEL_COUNT = 5;
+const TIER_A_NC_ONLY_COUNT = 1 + 1 + HECTTOR_SUBMODEL_COUNT;
 
 type NcConfigBreakdown = {
-  none: number;
   dtln: number;
   hush: number;
   hecttor: number;
-  /** Configs scored by this run */
-  inRun: number;
-  /** Full comparison grid incl. none baseline */
-  full: number;
+  /** NC configs scored by this run */
+  total: number;
 };
 
 type RunJobEstimate = {
@@ -334,10 +331,8 @@ type RunJobEstimate = {
   sttCount: number;
   mode: "sweep" | "tier";
   subprocessJobs: number;
-  /** NC evaluations this run produces */
+  /** NC evaluations this run produces (noise cancellation only) */
   ncEvaluations: number;
-  /** calls × STTs × full config grid (51 when all strengths selected) */
-  ncEvaluationsFullGrid: number;
   strengthTrials: number;
   configBreakdown: NcConfigBreakdown;
 };
@@ -354,29 +349,24 @@ function estimateRunJobs(input: {
     input;
   if (!callCount || !sttCount) return null;
 
-  const noneConfigs = 1;
   const hecttorConfigs = hecttorStrengths * HECTTOR_SUBMODEL_COUNT;
-  const fullConfigs = noneConfigs + dtlnStrengths + hushStrengths + hecttorConfigs;
 
   if (isSweep) {
     const strengthTrials = dtlnStrengths + hushStrengths + hecttorStrengths;
     if (strengthTrials === 0) return null;
-    const inRunConfigs = dtlnStrengths + hushStrengths + hecttorConfigs;
+    const ncConfigs = dtlnStrengths + hushStrengths + hecttorConfigs;
     return {
       calls: callCount,
       sttCount,
       mode: "sweep",
       strengthTrials,
       subprocessJobs: callCount * sttCount * strengthTrials,
-      ncEvaluations: callCount * sttCount * inRunConfigs,
-      ncEvaluationsFullGrid: callCount * sttCount * fullConfigs,
+      ncEvaluations: callCount * sttCount * ncConfigs,
       configBreakdown: {
-        none: noneConfigs,
         dtln: dtlnStrengths,
         hush: hushStrengths,
         hecttor: hecttorConfigs,
-        inRun: inRunConfigs,
-        full: fullConfigs,
+        total: ncConfigs,
       },
     };
   }
@@ -387,15 +377,12 @@ function estimateRunJobs(input: {
     mode: "tier",
     strengthTrials: 0,
     subprocessJobs: callCount * sttCount,
-    ncEvaluations: callCount * sttCount * TIER_A_NC_MODEL_COUNT,
-    ncEvaluationsFullGrid: callCount * sttCount * TIER_A_NC_MODEL_COUNT,
+    ncEvaluations: callCount * sttCount * TIER_A_NC_ONLY_COUNT,
     configBreakdown: {
-      none: noneConfigs,
       dtln: 1,
       hush: 1,
       hecttor: HECTTOR_SUBMODEL_COUNT,
-      inRun: TIER_A_NC_MODEL_COUNT,
-      full: TIER_A_NC_MODEL_COUNT,
+      total: TIER_A_NC_ONLY_COUNT,
     },
   };
 }
@@ -427,15 +414,6 @@ function JobEstimatePanel({ estimate }: { estimate: RunJobEstimate | null }) {
           </thead>
           <tbody>
             <tr className="border-b border-slate-100">
-              <td className="py-1.5 pr-3">none (baseline)</td>
-              <td className="py-1.5 pr-3 font-medium">{b.none}</td>
-              <td className="py-1.5 text-slate-500">
-                {estimate.mode === "sweep"
-                  ? "Tier A run only — not in strength sweep"
-                  : "included in Tier A run"}
-              </td>
-            </tr>
-            <tr className="border-b border-slate-100">
               <td className="py-1.5 pr-3">dtln</td>
               <td className="py-1.5 pr-3 font-medium">{b.dtln}</td>
               <td className="py-1.5 text-slate-500">
@@ -459,17 +437,12 @@ function JobEstimatePanel({ estimate }: { estimate: RunJobEstimate | null }) {
               </td>
             </tr>
             <tr className="font-medium text-slate-900">
-              <td className="py-1.5 pr-3">Total configs / call / STT</td>
-              <td className="py-1.5 pr-3">
-                {b.inRun}
-                {estimate.mode === "sweep" && b.full !== b.inRun ? (
-                  <span className="font-normal text-slate-500"> ({b.full} with none)</span>
-                ) : null}
-              </td>
+              <td className="py-1.5 pr-3">Total NC configs / call / STT</td>
+              <td className="py-1.5 pr-3">{b.total}</td>
               <td className="py-1.5 font-normal text-slate-500">
                 {estimate.mode === "sweep"
-                  ? "Compare best NC + strength + STT"
-                  : "8 models at default strength"}
+                  ? "DTLN + Hush + Hecttor strengths only"
+                  : "7 NC engines at default strength"}
               </td>
             </tr>
           </tbody>
@@ -492,12 +465,6 @@ function JobEstimatePanel({ estimate }: { estimate: RunJobEstimate | null }) {
           <dt className="text-slate-500">NC evaluations (this run)</dt>
           <dd className="font-medium">{fmt(estimate.ncEvaluations)}</dd>
         </div>
-        {estimate.mode === "sweep" && estimate.ncEvaluationsFullGrid !== estimate.ncEvaluations ? (
-          <div>
-            <dt className="text-slate-500">Full grid incl. none baseline</dt>
-            <dd className="font-medium">{fmt(estimate.ncEvaluationsFullGrid)}</dd>
-          </div>
-        ) : null}
       </dl>
 
       <p className="mt-2 text-[11px] text-slate-500">
@@ -505,14 +472,12 @@ function JobEstimatePanel({ estimate }: { estimate: RunJobEstimate | null }) {
           <>
             Strength sweep: {estimate.strengthTrials} subprocess jobs per call/STT ({b.dtln}{" "}
             DTLN + {b.hush} Hush + {b.hecttor / HECTTOR_SUBMODEL_COUNT} Hecttor trials; each
-            Hecttor trial scores all {HECTTOR_SUBMODEL_COUNT} sub-models). Add a Tier A run for
-            the none baseline ({fmt(estimate.calls * estimate.sttCount * b.none)} extra
-            evaluations) to reach {fmt(estimate.ncEvaluationsFullGrid)} total.
+            Hecttor trial scores all {HECTTOR_SUBMODEL_COUNT} sub-models).
           </>
         ) : (
           <>
-            Tier A: one job per call/STT scoring all {TIER_A_NC_MODEL_COUNT} NC models (none, dtln,
-            hush, {HECTTOR_SUBMODEL_COUNT}× hecttor) at default strength.
+            Tier A: one job per call/STT scoring {TIER_A_NC_ONLY_COUNT} NC engines (dtln, hush,{" "}
+            {HECTTOR_SUBMODEL_COUNT}× hecttor) at default strength.
           </>
         )}
       </p>
@@ -520,12 +485,26 @@ function JobEstimatePanel({ estimate }: { estimate: RunJobEstimate | null }) {
   );
 }
 
+function downloadJsonFile(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function RunProgressPanel({
   progress,
   title,
+  sweepId,
+  onDownloadStt,
 }: {
   progress: TaskProgress | null | undefined;
   title?: string;
+  sweepId?: string | null;
+  onDownloadStt?: (sttId: string, label: string) => void;
 }) {
   if (!progress) return null;
 
@@ -578,12 +557,25 @@ function RunProgressPanel({
         <div className="mt-3">
           <div className="mb-1 font-medium text-slate-700">STT progress</div>
           <div className="space-y-1.5">
-            {progress.stt_stats.map((stt) => (
+            {progress.stt_stats.map((stt) => {
+              const ready = progress.stt_results?.some((r) => r.stt_id === stt.stt_id);
+              return (
               <div key={stt.stt_id}>
-                <div className="flex justify-between text-[11px] text-slate-600">
+                <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
                   <span>{stt.label}</span>
-                  <span>
-                    {stt.completed}/{stt.total} ({stt.pct}%)
+                  <span className="flex items-center gap-2">
+                    <span>
+                      {stt.completed}/{stt.total} ({stt.pct}%)
+                    </span>
+                    {ready && sweepId && onDownloadStt ? (
+                      <button
+                        type="button"
+                        className="rounded bg-slate-900 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-slate-700"
+                        onClick={() => onDownloadStt(stt.stt_id, stt.label)}
+                      >
+                        Download
+                      </button>
+                    ) : null}
                   </span>
                 </div>
                 <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
@@ -593,7 +585,8 @@ function RunProgressPanel({
                   />
                 </div>
               </div>
-            ))}
+            );
+            })}
           </div>
         </div>
       )}
@@ -633,9 +626,13 @@ function RunProgressPanel({
 function SweepResultsTable({
   sweepResult,
   onDownload,
+  onDownloadStt,
+  readySttIds,
 }: {
   sweepResult: SweepResponse;
   onDownload: () => void;
+  onDownloadStt?: (sttId: string, label: string) => void;
+  readySttIds?: Set<string>;
 }) {
   const sttGroups = useMemo(() => {
     if (!sweepResult?.results?.length) return [];
@@ -680,16 +677,32 @@ function SweepResultsTable({
           className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
           onClick={onDownload}
         >
-          Download JSON
+          Download all STTs
         </button>
       </div>
 
       {sttGroups.map(({ cfg, pivot }) =>
         !pivot ? null : (
           <div key={cfg.stt_id}>
-            <h4 className="mb-2 text-sm font-medium text-slate-800">
-              STT: {cfg.stt_provider}/{cfg.stt_model}
-            </h4>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h4 className="text-sm font-medium text-slate-800">
+                STT: {cfg.stt_provider}/{cfg.stt_model}
+                {readySttIds && !readySttIds.has(cfg.stt_id) ? (
+                  <span className="ml-2 text-xs font-normal text-slate-500">(in progress)</span>
+                ) : null}
+              </h4>
+              {onDownloadStt && (!readySttIds || readySttIds.has(cfg.stt_id)) ? (
+                <button
+                  type="button"
+                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-800 hover:bg-slate-50"
+                  onClick={() =>
+                    onDownloadStt(cfg.stt_id, `${cfg.stt_provider}/${cfg.stt_model}`)
+                  }
+                >
+                  Download JSON
+                </button>
+              ) : null}
+            </div>
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
                 <thead>
@@ -841,6 +854,8 @@ export default function App() {
   const [sweepResult, setSweepResult] = useState<SweepResponse | null>(null);
   const [activeSweepId, setActiveSweepId] = useState<string | null>(null);
   const [sweepProgress, setSweepProgress] = useState<TaskProgress | null>(null);
+  const loadedSttRef = useRef<Set<string>>(new Set());
+  const [readySttIds, setReadySttIds] = useState<Set<string>>(new Set());
   const [workers, setWorkers] = useState(8);
   const [sttSelected, setSttSelected] = useState<Set<string>>(
     () => new Set(STT_PRESETS.map((p) => p.id)),
@@ -932,6 +947,68 @@ export default function App() {
     return () => clearInterval(timer);
   }, [anyRunRunning]);
 
+  const mergeSttSweepResult = useCallback((sttPayload: SweepResponse) => {
+    setSweepResult((prev) => {
+      const base: SweepResponse = prev ?? {
+        sweep_id: sttPayload.sweep_id,
+        dataset_id: sttPayload.dataset_id,
+        dataset_name: sttPayload.dataset_name,
+        total_calls: sttPayload.total_calls,
+        turn_align: sttPayload.turn_align,
+        scoring: sttPayload.scoring,
+        execution_mode: sttPayload.execution_mode,
+        workers: sttPayload.workers,
+        stt_configs: [],
+        results: [],
+      };
+      const configs = [...(base.stt_configs ?? [])];
+      const sttId = sttPayload.stt_id;
+      if (sttId && !configs.some((c) => c.stt_id === sttId)) {
+        configs.push({
+          stt_id: sttId,
+          stt_provider: (sttPayload as SweepResponse & { stt_provider?: string }).stt_provider ?? "unknown",
+          stt_model: (sttPayload as SweepResponse & { stt_model?: string }).stt_model ?? "unknown",
+          stt_language: (sttPayload as SweepResponse & { stt_language?: string }).stt_language ?? "hi",
+        });
+      }
+      const seen = new Set(
+        (base.results ?? []).map((r) => `${r.stt_id ?? ""}::${r.engine}::${r.strength}`),
+      );
+      const mergedResults = [...(base.results ?? [])];
+      for (const row of sttPayload.results ?? []) {
+        const key = `${row.stt_id ?? sttId ?? ""}::${row.engine}::${row.strength}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          mergedResults.push(row);
+        }
+      }
+      return { ...base, stt_configs: configs, results: mergedResults };
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!activeSweepId || !sweepProgress?.stt_results?.length) return;
+    let cancelled = false;
+    const readyList = sweepProgress.stt_results ?? [];
+    (async () => {
+      for (const item of readyList) {
+        if (cancelled || loadedSttRef.current.has(item.stt_id)) continue;
+        try {
+          const data = await api.getSweepSttResults(activeSweepId, item.stt_id);
+          if (cancelled) return;
+          loadedSttRef.current.add(item.stt_id);
+          setReadySttIds((prev) => new Set([...prev, item.stt_id]));
+          mergeSttSweepResult(data);
+        } catch {
+          /* not ready yet */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSweepId, sweepProgress?.stt_results, mergeSttSweepResult]);
+
   useEffect(() => {
     if (!activeSweepId || !sweepRunning) return;
     const poll = async () => {
@@ -941,11 +1018,13 @@ export default function App() {
         if (snap.status === "completed" && snap.result) {
           setSweepResult(snap.result);
           setSweepRunning(false);
-          setActiveSweepId(null);
+          for (const item of snap.stt_results ?? []) {
+            loadedSttRef.current.add(item.stt_id);
+          }
+          setReadySttIds(new Set((snap.stt_results ?? []).map((r) => r.stt_id)));
         } else if (snap.status === "failed") {
           setError(snap.error || "Strength sweep failed");
           setSweepRunning(false);
-          setActiveSweepId(null);
         }
       } catch {
         /* ignore transient 404 while sweep starts */
@@ -1002,6 +1081,8 @@ export default function App() {
       setSweepRunning(true);
       setSweepResult(null);
       setSweepProgress(null);
+      loadedSttRef.current = new Set();
+      setReadySttIds(new Set());
       setError(null);
       try {
         const alignValue = turnAlign === "full" ? "vad" : turnAlign;
@@ -1067,17 +1148,39 @@ export default function App() {
     }
   };
 
-  const handleDownloadSweepJSON = () => {
+  const handleDownloadSweepStt = async (sttId: string, label: string) => {
+    const sweepId = activeSweepId ?? sweepResult?.sweep_id;
+    if (!sweepId) return;
+    try {
+      const data = await api.getSweepSttResults(sweepId, sttId);
+      downloadJsonFile(
+        data,
+        `strength_sweep_${data.dataset_name || data.dataset_id}_${label.replace(/[^\w.-]+/g, "_")}.json`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Download failed");
+    }
+  };
+
+  const handleDownloadSweepJSON = async () => {
+    const sweepId = activeSweepId ?? sweepResult?.sweep_id;
+    if (sweepId) {
+      try {
+        const data = await api.getSweepAllResults(sweepId);
+        downloadJsonFile(
+          data,
+          `strength_sweep_${data.dataset_name || data.dataset_id}_all.json`,
+        );
+        return;
+      } catch {
+        /* fall back to in-memory */
+      }
+    }
     if (!sweepResult) return;
-    const blob = new Blob([JSON.stringify(sweepResult, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `strength_sweep_${sweepResult.dataset_name || sweepResult.dataset_id}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadJsonFile(
+      sweepResult,
+      `strength_sweep_${sweepResult.dataset_name || sweepResult.dataset_id}_all.json`,
+    );
   };
 
   return (
@@ -1202,7 +1305,7 @@ export default function App() {
             </select>
             <select className="input" value={tier} onChange={(e) => setTier(e.target.value)}>
               <option value="tier_a">
-                Tier A — 8 NC models (none, dtln, hush, 5× hecttor)
+                Tier A — dtln, hush, 5× hecttor (+ none baseline in scoring)
               </option>
               <option value="tier_b">Tier B — sanas (both models, Linux Docker)</option>
             </select>
@@ -1430,6 +1533,8 @@ export default function App() {
                     ? sweepProgress
                     : (selectedRun?.progress_detail as TaskProgress | undefined)
                 }
+                sweepId={activeSweepId}
+                onDownloadStt={sweepRunning || activeSweepId ? handleDownloadSweepStt : undefined}
               />
             ) : null}
 
@@ -1453,8 +1558,13 @@ export default function App() {
         </section>
       </div>
 
-      {sweepResult && (
-        <SweepResultsTable sweepResult={sweepResult} onDownload={handleDownloadSweepJSON} />
+      {(sweepResult || sweepRunning) && sweepResult && (
+        <SweepResultsTable
+          sweepResult={sweepResult}
+          onDownload={handleDownloadSweepJSON}
+          onDownloadStt={handleDownloadSweepStt}
+          readySttIds={sweepRunning ? readySttIds : undefined}
+        />
       )}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
